@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<style>
+:root{--prim:#175848;--txt:#262730}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:transparent;font-family:"Source Sans Pro",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+#zone{position:relative;width:100%;line-height:0;border:1px solid #d5d8de;box-shadow:0 2px 10px rgba(0,0,0,.10);background:#fff;user-select:none;-webkit-user-select:none}
+#img{display:block;pointer-events:none}
+.cadre{position:absolute;border:1px dashed transparent;cursor:move;touch-action:none;transform-origin:50% 50%}
+.cadre:hover{border-color:var(--prim);background:rgba(23,88,72,.06)}
+.cadre.actif{border:1.5px solid var(--prim);background:rgba(23,88,72,.07);z-index:5}
+.cadre .etiquette{display:none;position:absolute;left:-1px;top:-18px;line-height:16px;font-size:11px;background:var(--prim);color:#fff;padding:0 6px;white-space:nowrap}
+.cadre:hover .etiquette,.cadre.actif .etiquette{display:block}
+.poignee{display:none;position:absolute;right:-6px;bottom:-6px;width:12px;height:12px;background:var(--prim);border:2px solid #fff;border-radius:50%;cursor:nwse-resize;touch-action:none}
+.cadre:hover .poignee,.cadre.actif .poignee{display:block}
+#aide{font-size:12px;color:#8a8d96;margin-top:6px;line-height:1.3}
+</style></head>
+<body>
+<div id="zone"><img id="img" alt="Aperçu de l'affiche"></div>
+<div id="aide">Glisser un élément pour le déplacer ; tirer la poignée verte d'un coin pour le redimensionner.</div>
+<script>
+"use strict";
+const zone = document.getElementById("zone"), img = document.getElementById("img");
+let args = null, srcCourant = "", action = null;
+
+function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data||{}), "*"); }
+function hauteur(){ post("streamlit:setFrameHeight", {height: Math.ceil(zone.offsetHeight + 34)}); }
+function envoyer(v){ post("streamlit:setComponentValue", {value: Object.assign({ts: Date.now() + Math.random()}, v), dataType: "json"}); }
+
+function construire(){
+  if(!args) return;
+  const w = zone.clientWidth, h = w * args.ratio;
+  img.style.width = w + "px"; img.style.height = h + "px";
+  zone.querySelectorAll(".cadre").forEach(n => n.remove());
+  for(const [el, c] of Object.entries(args.cadres || {})){
+    const pad = 3;
+    const d = document.createElement("div");
+    d.className = "cadre" + (el === args.actif ? " actif" : "");
+    d.dataset.el = el;
+    d.style.left = (c[0]*w - pad) + "px"; d.style.top = (c[1]*h - pad) + "px";
+    d.style.width = ((c[2]-c[0])*w + 2*pad) + "px"; d.style.height = ((c[3]-c[1])*h + 2*pad) + "px";
+    d.innerHTML = '<span class="etiquette">' + ((args.noms||{})[el] || el) + '</span><span class="poignee"></span>';
+    zone.appendChild(d);
+  }
+  hauteur();
+}
+
+zone.addEventListener("pointerdown", e => {
+  const cadre = e.target.closest(".cadre");
+  if(!cadre) return;
+  e.preventDefault();
+  cadre.setPointerCapture(e.pointerId);
+  const r = cadre.getBoundingClientRect();
+  action = {cadre, el: cadre.dataset.el, taille: e.target.classList.contains("poignee"),
+            x0: e.clientX, y0: e.clientY, cx: r.left + r.width/2, cy: r.top + r.height/2,
+            d0: Math.hypot(e.clientX - (r.left + r.width/2), e.clientY - (r.top + r.height/2)), dx: 0, dy: 0, k: 1};
+  zone.querySelectorAll(".cadre.actif").forEach(n => n.classList.remove("actif"));
+  cadre.classList.add("actif");
+});
+zone.addEventListener("pointermove", e => {
+  if(!action) return;
+  if(action.taille){
+    action.k = Math.max(0.2, Math.min(5, Math.hypot(e.clientX - action.cx, e.clientY - action.cy) / Math.max(8, action.d0)));
+    action.cadre.style.transform = "scale(" + action.k + ")";
+  }else{
+    action.dx = e.clientX - action.x0; action.dy = e.clientY - action.y0;
+    action.cadre.style.transform = "translate(" + action.dx + "px," + action.dy + "px)";
+  }
+});
+function fin(e){
+  if(!action) return;
+  const a = action; action = null;
+  const w = zone.clientWidth, h = zone.clientHeight;
+  const bouge = a.taille ? Math.abs(a.k - 1) > 0.02 : Math.hypot(a.dx, a.dy) > 4;
+  if(!bouge){ a.cadre.style.transform = ""; envoyer({el: a.el, clic: true, ddx: 0, ddy: 0, ds: 1}); return; }
+  envoyer({el: a.el, clic: false, ddx: a.taille ? 0 : a.dx / w, ddy: a.taille ? 0 : a.dy / h, ds: a.taille ? a.k : 1});
+}
+zone.addEventListener("pointerup", fin);
+zone.addEventListener("pointercancel", fin);
+
+window.addEventListener("message", e => {
+  const d = e.data || {};
+  if(d.type !== "streamlit:render") return;
+  args = d.args || {};
+  if(args.image !== srcCourant){ srcCourant = args.image; img.onload = construire; img.src = args.image; }
+  construire();
+  if(d.theme && d.theme.primaryColor) {} // couleur fixe de la charte
+});
+window.addEventListener("resize", construire);
+post("streamlit:componentReady", {apiVersion: 1});
+</script></body></html>
