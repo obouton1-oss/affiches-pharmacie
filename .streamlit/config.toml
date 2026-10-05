@@ -1,0 +1,5 @@
+[theme]
+primaryColor = "#175848"
+
+[client]
+toolbarMode = "viewer"
