@@ -1,0 +1,9 @@
+streamlit
+reportlab
+pymupdf
+requests
+pillow
+ddgs
+opencv-contrib-python-headless
+huggingface_hub
+rembg[cpu]

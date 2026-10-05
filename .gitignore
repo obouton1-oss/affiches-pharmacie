@@ -1,0 +1,6 @@
+__pycache__/
+images/
+modeles/
+style.json
+catalogue*.csv
+.streamlit/secrets.toml
