@@ -3,4 +3,6 @@ images/
 modeles/
 style.json
 catalogue*.csv
+historique/
+.cache/
 .streamlit/secrets.toml
