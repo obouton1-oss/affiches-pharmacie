@@ -1,44 +1,61 @@
 <!doctype html>
 <html lang="fr"><head><meta charset="utf-8">
 <style>
-:root{--prim:#175848;--txt:#262730}
+:root{--prim:#2F6FEB;--prim-a:rgba(47,111,235,.07)}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:transparent;font-family:"Source Sans Pro",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
-#zone{position:relative;width:100%;line-height:0;border:1px solid #d5d8de;box-shadow:0 2px 10px rgba(0,0,0,.10);background:#fff;user-select:none;-webkit-user-select:none}
+#zone{position:relative;margin:0 auto;width:100%;line-height:0;border:1px solid #d5d8de;box-shadow:0 2px 10px rgba(0,0,0,.10);background:#fff;user-select:none;-webkit-user-select:none}
 #img{display:block;pointer-events:none}
 .cadre{position:absolute;border:1px dashed transparent;cursor:move;touch-action:none;transform-origin:50% 50%}
-.cadre:hover{border-color:var(--prim);background:rgba(23,88,72,.06)}
-.cadre.actif{border:1.5px solid var(--prim);background:rgba(23,88,72,.07);z-index:5}
+.cadre:hover{border-color:var(--prim);background:var(--prim-a)}
+.cadre.actif{border:1.5px solid var(--prim);background:var(--prim-a);z-index:5}
 .cadre .etiquette{display:none;position:absolute;left:-1px;top:-18px;line-height:16px;font-size:11px;background:var(--prim);color:#fff;padding:0 6px;white-space:nowrap}
 .cadre:hover .etiquette,.cadre.actif .etiquette{display:block}
 .poignee{display:none;position:absolute;right:-6px;bottom:-6px;width:12px;height:12px;background:var(--prim);border:2px solid #fff;border-radius:50%;cursor:nwse-resize;touch-action:none}
 .cadre:hover .poignee,.cadre.actif .poignee{display:block}
-#aide{font-size:12px;color:#8a8d96;margin-top:6px;line-height:1.3}
+#aide{font-size:12px;color:#8a8d96;margin-top:6px;line-height:1.3;text-align:center;padding-bottom:2px}
 </style></head>
 <body>
 <div id="zone"><img id="img" alt="Aperçu de l'affiche"></div>
-<div id="aide">Glisser un élément pour le déplacer ; tirer la poignée verte d'un coin pour le redimensionner.</div>
+<div id="aide">Glisser un élément pour le déplacer, tirer sa poignée pour l'agrandir.</div>
 <script>
 "use strict";
 const zone = document.getElementById("zone"), img = document.getElementById("img");
+const LARGEUR_MIN = 200, aide = document.getElementById("aide");
 let args = null, srcCourant = "", action = null;
 
 function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data||{}), "*"); }
-function hauteur(){ post("streamlit:setFrameHeight", {height: Math.ceil(zone.offsetHeight + 34)}); }
+function hauteur(){ post("streamlit:setFrameHeight", {height: Math.ceil(zone.offsetHeight + aide.offsetHeight + 8)}); }
 function envoyer(v){ post("streamlit:setComponentValue", {value: Object.assign({ts: Date.now() + Math.random()}, v), dataType: "json"}); }
+
+// Hauteur de la fenêtre de l'application (la page parente) : l'affiche ne doit jamais dépasser l'écran
+function hauteurFenetre(){
+  try{ return window.parent.innerHeight || 0; }catch(e){ return 0; }
+}
 
 function construire(){
   if(!args) return;
-  const w = zone.clientWidth, h = w * args.ratio;
-  img.style.width = w + "px"; img.style.height = h + "px";
+  const dispo = document.body.clientWidth;               // largeur offerte par la colonne
+  const reserve = +args.reserve || 0;                    // hauteur occupée autour de l'affiche (boutons, marges)
+  const hf = hauteurFenetre();
+  let w = dispo;
+  if(reserve > 0 && hf > 0){
+    const hMax = Math.max(hf - reserve, LARGEUR_MIN * args.ratio);
+    w = Math.max(Math.min(dispo, hMax / args.ratio), Math.min(dispo, LARGEUR_MIN));
+  }
+  w = Math.floor(w);
+  zone.style.width = w + "px";
+  const h = w * args.ratio;
+  img.style.width = (w - 2) + "px"; img.style.height = (h - 2) + "px";
   zone.querySelectorAll(".cadre").forEach(n => n.remove());
+  const wi = w - 2, hi = h - 2;
   for(const [el, c] of Object.entries(args.cadres || {})){
     const pad = 3;
     const d = document.createElement("div");
     d.className = "cadre" + (el === args.actif ? " actif" : "");
     d.dataset.el = el;
-    d.style.left = (c[0]*w - pad) + "px"; d.style.top = (c[1]*h - pad) + "px";
-    d.style.width = ((c[2]-c[0])*w + 2*pad) + "px"; d.style.height = ((c[3]-c[1])*h + 2*pad) + "px";
+    d.style.left = (c[0]*wi - pad) + "px"; d.style.top = (c[1]*hi - pad) + "px";
+    d.style.width = ((c[2]-c[0])*wi + 2*pad) + "px"; d.style.height = ((c[3]-c[1])*hi + 2*pad) + "px";
     d.innerHTML = '<span class="etiquette">' + ((args.noms||{})[el] || el) + '</span><span class="poignee"></span>';
     zone.appendChild(d);
   }
@@ -78,14 +95,25 @@ function fin(e){
 zone.addEventListener("pointerup", fin);
 zone.addEventListener("pointercancel", fin);
 
+// Couleur d'accent : celle du thème de l'application
+function accent(hex){
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || "").trim());
+  if(!m) return;
+  const n = parseInt(m[1], 16);
+  const r = document.documentElement.style;
+  r.setProperty("--prim", "#" + m[1]);
+  r.setProperty("--prim-a", "rgba(" + (n >> 16) + "," + ((n >> 8) & 255) + "," + (n & 255) + ",.08)");
+}
+
 window.addEventListener("message", e => {
   const d = e.data || {};
   if(d.type !== "streamlit:render") return;
   args = d.args || {};
+  if(d.theme && d.theme.primaryColor) accent(d.theme.primaryColor);
   if(args.image !== srcCourant){ srcCourant = args.image; img.onload = construire; img.src = args.image; }
   construire();
-  if(d.theme && d.theme.primaryColor) {} // couleur fixe de la charte
 });
 window.addEventListener("resize", construire);
+try{ window.parent.addEventListener("resize", construire); }catch(e){}
 post("streamlit:componentReady", {apiVersion: 1});
 </script></body></html>
