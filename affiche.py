@@ -1,17 +1,21 @@
 """Génération du PDF d'affiche promo (fond blanc, prêt à imprimer).
 
-Ordre de haut en bas : visuel, marque (grande), détail du produit (plus petit), prix barré, prix, dates, logo.
-Chaque élément (visuel, marque, détail, prix barré, prix, dates, logo) peut être déplacé et redimensionné
+Ordre de haut en bas : visuel, marque (grande), détail du produit (plus petit), prix barré, prix, texte sous le prix,
+dates, logo. Pour un autre type de promotion (voir promos.py), le prix devient l'offre elle-même (« 3 pour 2 »…),
+avec un petit texte au-dessus dans le bandeau et une pastille facultative (« –25 % ») sur le visuel.
+Chaque élément (visuel, marque, détail, prix barré, prix, texte sous le prix, pastille, dates, logo) peut être
+déplacé et redimensionné
 via `reglages = {element: {"dx": ..., "dy": ..., "s": ...}}` :
   dx, dy : déplacement en fraction de la largeur / hauteur de la page (dy positif = vers le haut)
   s      : facteur de taille (1 = taille automatique)
 """
 import io
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from reportlab.lib.colors import HexColor
+from reportlab.lib.colors import HexColor, white
 from reportlab.lib.pagesizes import A4, A5, A6
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -24,7 +28,7 @@ LOGO = Path(__file__).parent / "logo.png"
 
 FORMATS = {"A4": A4, "A5": A5, "A6": A6}
 ELEMENTS = {"image": "Visuel", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
-            "prix": "Prix", "dates": "Dates", "logo": "Logo"}
+            "prix": "Prix", "ligne": "Texte sous le prix", "pastille": "Pastille", "dates": "Dates", "logo": "Logo"}
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
         "août", "septembre", "octobre", "novembre", "décembre"]
 GRAS, NORMAL = "Helvetica-Bold", "Helvetica"
@@ -119,7 +123,7 @@ def libelle_dates(debut: date | None, fin: date | None) -> str:
 
 
 def _lignes_auto(texte, police, taille, largeur_max):
-    mots, lignes, cour = texte.split(), [], ""
+    mots, lignes, cour = [m for m in re.split(r"[ \t\r\n]+", texte) if m], [], ""  # l'espace insécable ne coupe pas
     for m in mots:
         test = f"{cour} {m}".strip()
         if stringWidth(test, police, taille) <= largeur_max or not cour:
@@ -177,17 +181,110 @@ def _dessiner_prix(c, p, cx, base_y, taille, gras=GRAS, couleur=VERT, hc=0.72):
         c.drawString(x2, base_y + cap - petit * hc, "€")
 
 
+# ----------------------------------------------------------------------------
+# Autres types de promotion : texte principal, petit texte au-dessus, pastille
+# ----------------------------------------------------------------------------
+K_TAILLE = 0.30   # corps du petit texte au-dessus du prix, en fraction du corps du prix
+K_ECART = 0.16    # espace entre le prix et le petit texte, en fraction du corps du prix
+SUP_TAILLE = 0.62  # corps d'un exposant (« e » de 2e), en fraction du corps du texte
+_EXPOSANT = re.compile(r"\^\{([^}]*)\}")
+
+
+def _segments(texte):
+    """'2^{e} à' -> [('2', False), ('e', True), (' à', False)] (True = exposant)."""
+    res, pos = [], 0
+    for m in _EXPOSANT.finditer(texte):
+        if m.start() > pos:
+            res.append((texte[pos:m.start()], False))
+        res.append((m.group(1), True))
+        pos = m.end()
+    if pos < len(texte):
+        res.append((texte[pos:], False))
+    return res
+
+
+def _largeur_texte(texte, police, taille):
+    return sum(stringWidth(t, police, taille * (SUP_TAILLE if sup else 1)) for t, sup in _segments(texte))
+
+
+def _dessiner_texte(c, texte, cx, base, taille, police, couleur, hc=0.72):
+    """Texte centré en cx, sur la ligne de base `base` ; ^{e} = exposant."""
+    x = cx - _largeur_texte(texte, police, taille) / 2
+    c.setFillColor(couleur)
+    for t, sup in _segments(texte):
+        corps = taille * (SUP_TAILLE if sup else 1)
+        c.setFont(police, corps)
+        c.drawString(x, base + (taille * hc * 0.36 if sup else 0), t)
+        x += stringWidth(t, police, corps)
+
+
+def _largeur_grand(prix, grand, taille, gras):
+    """Largeur du contenu principal du bandeau : le texte `grand` s'il y en a un, sinon le prix."""
+    return _largeur_texte(grand, gras, taille) if grand else _largeur_prix(prix, taille, gras)
+
+
+def _contenu_bandeau(prix, grand, kicker, taille, gras, hc):
+    """(largeur du contenu, hauteur ajoutée par le petit texte) du bandeau pour un corps `taille`."""
+    w = _largeur_grand(prix, grand, taille, gras)
+    if kicker:
+        w = max(w, _largeur_texte(kicker, gras, taille * K_TAILLE))
+    return w, ((K_ECART + hc * K_TAILLE) * taille if kicker else 0.0)
+
+
+def _facteur_bandeau(grand, kicker):
+    """Réduction du corps de départ du prix quand le bandeau contient aussi un petit texte ou un texte principal."""
+    if kicker:
+        return 0.80
+    return 0.88 if grand else 1.0
+
+
+def _dessiner_bandeau(c, prix, grand, kicker, cx, base, taille, gras, couleur, hc):
+    """Contenu du bandeau : prix (ou texte principal) sur la ligne de base `base`, petit texte au-dessus."""
+    if grand:
+        _dessiner_texte(c, grand, cx, base, taille, gras, couleur, hc)
+    else:
+        _dessiner_prix(c, prix, cx, base, taille, gras, couleur, hc)
+    if kicker:
+        _dessiner_texte(c, kicker, cx, base + hc * taille + K_ECART * taille, taille * K_TAILLE, gras, couleur, hc)
+
+
+def _pastille(c, texte, cx, cy, rayon, gras, couleur_fond, couleur_texte):
+    """Disque coloré avec le texte (« –25 % ») au centre. Retourne le rayon réellement utilisé."""
+    c.setFillColor(couleur_fond)
+    c.circle(cx, cy, rayon, stroke=0, fill=1)
+    unite = max(0.1, _largeur_texte(texte, gras, 1.0))
+    corps = min(rayon * 0.80, rayon * 1.55 / unite)
+    c.setFillColor(couleur_texte)
+    c.setFont(gras, corps)
+    c.drawCentredString(cx, cy - corps * 0.36, texte)
+    return rayon
+
+
+def rayon_pastille(texte, largeur_page, gras):
+    """Rayon de la pastille : plus grand quand le texte est long (« –12,50 € »)."""
+    unite = max(0.1, _largeur_texte(texte, gras, 1.0))
+    return largeur_page * 0.10 * min(1.35, max(1.0, unite / 3.2))
+
+
 def _reg(reglages, el):
     g = (reglages or {}).get(el) or {}
     return float(g.get("dx", 0.0)), float(g.get("dy", 0.0)), max(0.1, float(g.get("s", 1.0)))
 
 
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
-                   image=None, afficher_logo=True, reglages=None, majuscules=True, style=None):
+                   image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
+    promo : autre type de promotion (voir promos.composer, clé « rendu ») : kicker (petit texte au-dessus),
+    grand (texte principal à la place du prix), prix, prix_barre, ligne (texte sous le prix), pastille.
+    Sans promo, c'est l'affiche « prix promo » d'origine (prix et prix_barre).
     Retourne les cadres des éléments, normalisés (x0, y0, x1, y1) depuis le coin haut-gauche."""
     W, H = taille_page
+    promo = promo or {}
+    if promo:
+        prix, prix_barre = promo.get("prix"), promo.get("prix_barre")
+    kicker, grand = (promo.get("kicker") or "").strip(), (promo.get("grand") or "").strip()
+    texte_ligne, texte_pastille = (promo.get("ligne") or "").strip(), (promo.get("pastille") or "").strip()
     st = dict(STYLE_DEFAUT)
     st.update(style or {})
     reg, bold = polices_famille(st["police"])
@@ -232,13 +329,23 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
             taille_d -= 0.5
         y += taille_d + H * 0.022
 
+    # texte sous le prix (calcul de la promotion, précision) : juste au-dessus des dates
+    y_ligne, bloc_l, l_ligne, t_ligne = y, 0.0, [], 0.0
+    if texte_ligne:
+        l_ligne, t_ligne = _ajuster_titre(texte_ligne, reg, zone_w, H * 0.10, H * 0.028, max_lignes=3)
+        bloc_l = len(l_ligne) * t_ligne * 1.15
+        y += bloc_l + H * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
+
     fond = bool(st.get("fond_prix"))
     pad_x, pad_b, pad_h = 0.20, 0.12, 0.16  # marges du bandeau, en fraction du corps du prix
-    taille_p = H * (0.22 if fond else 0.14)
-    while (_largeur_prix(prix, taille_p, bold) + (2 * pad_x * taille_p if fond else 0)) > zone_w and taille_p > 10:
+    taille_p = H * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
+    while True:
+        w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, bold, hc)
+        if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
+            break
         taille_p -= 1
     y_prix = y + (taille_p * pad_b if fond else 0)
-    y = y_prix + taille_p * hc + (taille_p * pad_h if fond else 0) + H * 0.02
+    y = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0) + H * 0.02
 
     taille_b = 0.0
     y_barre = y
@@ -307,15 +414,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.line(cx - wt / 2 - t * 0.1, base - t * 0.25, cx + wt / 2 + t * 0.1, base + t * 0.95)  # diagonale ↗
         cadres["prix_barre"] = (cx - wt / 2, base - t * 0.25, cx + wt / 2, base + t * 0.95)
 
-    # ---- Prix
+    # ---- Prix (ou texte principal de l'offre), avec son petit texte au-dessus
     dx, dy, s = _reg(reglages, "prix")
     p = taille_p * s
     cx = W / 2 + dx * W
-    base = (y_prix + taille_p * hc / 2) + dy * H - p * hc / 2
-    wp = _largeur_prix(prix, p, bold)
+    wp, h_kicker_p = _contenu_bandeau(prix, grand, kicker, p, bold, hc)
+    base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
     if fond:  # bandeau coloré derrière le prix
         bx0, bx1 = cx - wp / 2 - pad_x * p, cx + wp / 2 + pad_x * p
-        by0, by1 = base - pad_b * p, base + p * hc + pad_h * p
+        by0, by1 = base - pad_b * p, base + p * hc + h_kicker_p + pad_h * p
         c.setFillColor(HexColor(st["couleur_fond_prix"]))
         c.roundRect(bx0, by0, bx1 - bx0, by1 - by0, 0.14 * p, stroke=0, fill=1)
         cadres["prix"] = (bx0, by0, bx1, by1)
@@ -323,8 +430,32 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.setStrokeColor(col_accent)
         c.setLineWidth(max(1.5, H * 0.004 * s))
         c.line(cx - wp / 2, base - p * 0.07, cx + wp / 2, base - p * 0.07)
-        cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc)
-    _dessiner_prix(c, prix, cx, base, p, bold, col_prix, hc)
+        cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc + h_kicker_p)
+    _dessiner_bandeau(c, prix, grand, kicker, cx, base, p, bold, col_prix, hc)
+
+    # ---- Texte sous le prix
+    if l_ligne:
+        dx, dy, s = _reg(reglages, "ligne")
+        t = t_ligne * s
+        hb = len(l_ligne) * t * 1.15
+        cx = W / 2 + dx * W
+        haut = (y_ligne + bloc_l / 2) + dy * H + hb / 2
+        c.setFillColor(col_nom)
+        c.setFont(reg, t)
+        for i, l in enumerate(l_ligne):
+            c.drawCentredString(cx, haut - t * 0.85 - i * t * 1.15, l)
+        lmax = max(stringWidth(l, reg, t) for l in l_ligne)
+        cadres["ligne"] = (cx - lmax / 2, haut - hb, cx + lmax / 2, haut)
+
+    # ---- Pastille (« –25 % »), en haut à droite du visuel
+    if texte_pastille:
+        dx, dy, s = _reg(reglages, "pastille")
+        r0 = rayon_pastille(texte_pastille, W, bold)
+        r = r0 * s
+        cx, cy = W - m - r0 * 0.95 + dx * W, y_haut - r0 * 0.95 + dy * H
+        _pastille(c, texte_pastille, cx, cy, r, bold,
+                  HexColor(st["couleur_fond_prix"]) if fond else col_prix, col_prix if fond else white)
+        cadres["pastille"] = (cx - r, cy - r, cx + r, cy + r)
 
     # ---- Dates
     if texte_dates:

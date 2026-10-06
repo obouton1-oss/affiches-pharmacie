@@ -19,6 +19,7 @@ import catalogue
 import historique
 import images_produits as ip
 import planche
+import promos
 import sauvegarde
 import nettete
 import nettoyage
@@ -69,8 +70,15 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("orientation_page", planche.PORTRAIT),
                     ("filtre_hist", "")):
     ss.setdefault(cle, defaut)
+# autres types de promotion : type choisi, champs et cases « Faire apparaître »
+for cle, defaut in ([("w_promo_type", promos.STANDARD)]
+                    + [(f"w_promo_{k}", v) for k, v in promos.CHAMPS_DEFAUT.items()]
+                    + [(f"w_promo_opt_{k}", v) for k, v in promos.OPTIONS_DEFAUT.items()]):
+    ss.setdefault(cle, defaut)
 if ss.reglages is None:
     ss.reglages = reglages_defaut()
+for _el, _reglage in reglages_defaut().items():  # éléments ajoutés depuis (texte sous le prix, pastille)
+    ss.reglages.setdefault(_el, _reglage)
 
 FICHIER_STYLE = DONNEES / "style.json"
 SEUIL_NETTETE = 700  # en dessous (côté le plus court, en pixels), la netteté peut être améliorée
@@ -130,6 +138,73 @@ def reinitialiser(el=None):
     ss.ver += 1
 
 
+def appliquer_defauts_promo():
+    """Au changement de type de promotion : valeurs de départ propres au type (le prix normal saisi est conservé)."""
+    for cle, valeur in (promos.TYPES[ss.w_promo_type].get("defauts") or {}).items():
+        ss[f"w_promo_{cle}"] = valeur
+    for cle, valeur in promos.OPTIONS_DEFAUT.items():
+        ss[f"w_promo_opt_{cle}"] = valeur
+
+
+def formulaire_promo(type_):
+    """Champs, cases « Faire apparaître » et précision du type de promotion choisi.
+    Retourne (résultat de promos.composer, promotion à enregistrer dans l'historique)."""
+    spec = promos.TYPES[type_]
+    options = {k: ss[f"w_promo_opt_{k}"] for k in promos.OPTIONS_DEFAUT}
+    with st.container(border=True):
+        st.caption(spec["aide"])
+        rangee, rempli = None, 0
+        for f in promos.champs_visibles(type_, {k: ss[f"w_promo_{k}"] for k in promos.CHAMPS_DEFAUT}):
+            cle = f"w_promo_{f['nom']}"
+            if f["genre"] == "texte":
+                st.text_input(f["libelle"], placeholder=f.get("placeholder", ""), key=cle)
+                rangee = None
+                continue
+            if rangee is None or rempli == 2:  # deux champs par ligne
+                rangee, rempli = st.columns(2), 0
+            colonne, rempli = rangee[rempli], rempli + 1
+            if f["genre"] == "entier":
+                colonne.number_input(f["libelle"], f["mini"], f["maxi"], step=1, key=cle)
+            elif f["genre"] == "prix":
+                colonne.text_input(f["libelle"], placeholder=f.get("placeholder", ""), key=cle)
+            else:
+                choix = [c if isinstance(c, tuple) else (c, c) for c in f["choix"]]
+                colonne.selectbox(f["libelle"], [v for v, _ in choix], format_func=dict(choix).get, key=cle)
+        champs = {k: ss[f"w_promo_{k}"] for k in promos.CHAMPS_DEFAUT}
+        res = promos.composer(type_, champs, options)
+
+        # Cases « Faire apparaître » : seulement celles qui ont un sens pour ce type (prix normal renseigné)
+        textes = res["textes"]
+        proposees = [o for o in spec["options"] if o in textes]
+        if proposees:
+            st.markdown("**Faire apparaître sur l'affiche**")
+            for opt in proposees:
+                st.checkbox(promos.LIBELLES_OPTIONS[opt].format(nom=spec.get("nom_pastille", "")),
+                            key=f"w_promo_opt_{opt}")
+                if opt == "calcul":
+                    if len(textes["calcul"]) > 1 and ss["w_promo_opt_calcul"]:
+                        st.radio("Calcul affiché", list(promos.FORMATS_CALCUL), horizontal=True,
+                                 format_func=promos.FORMATS_CALCUL.get, key="w_promo_opt_calcul_fmt")
+                    texte = textes["calcul"].get(options["calcul_fmt"]) or next(iter(textes["calcul"].values()))
+                else:
+                    texte = textes[opt]
+                st.caption(f"Texte affiché : « {promos.sans_balises(texte)} »")
+        elif spec["options"]:
+            st.caption("Renseigner le prix normal pour que l'outil calcule les prix et propose de faire apparaître "
+                       "le calcul. Sans prix normal, seule l'offre est affichée.")
+        if res["resume"]:
+            st.caption("Calcul : " + promos.sans_balises(res["resume"]))
+        st.text_input("Précision sous l'offre (facultatif)", key="w_promo_precision",
+                      placeholder="ex. : sur toute la gamme, dans la limite des stocks disponibles")
+
+    enregistre = {f["nom"]: champs[f["nom"]] for f in promos.champs_visibles(type_, champs)}
+    enregistre["precision"] = champs["precision"]
+    options_enregistrees = {o: options[o] for o in spec["options"]}
+    if "calcul" in spec["options"]:
+        options_enregistrees["calcul_fmt"] = options["calcul_fmt"]
+    return res, {"type": type_, "champs": enregistre, "options": options_enregistrees}
+
+
 def retablir_traitement():
     """Après « Rouvrir », le nettoyage et la netteté sont désactivés (le visuel enregistré est déjà traité) :
     on les réactive dès qu'un nouveau visuel est choisi."""
@@ -150,15 +225,20 @@ def _date_ou_aujourdhui(texte):
         return date.today()
 
 
-def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choix, visuel_affiche, apercu):
-    """Enregistre l'affiche affichée à l'écran dans l'historique. Retourne son identifiant."""
-    params = {"code": code, "marque": marque, "detail": detail, "prix": str(prix),
+def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choix, visuel_affiche, apercu,
+                        promo=None):
+    """Enregistre l'affiche affichée à l'écran dans l'historique. Retourne son identifiant.
+    promo : autre type de promotion (type, champs, options) ; prix = prix affiché, s'il y en a un."""
+    params = {"code": code, "marque": marque, "detail": detail,
+              "prix": str(prix) if prix is not None else None,
               "prix_barre": str(prix_barre) if prix_barre is not None else None,
               "debut": debut.isoformat() if debut else None, "fin": fin.isoformat() if fin else None,
               "format": choix, "largeur_mm": int(ss.w_lg) if choix == "Personnalisé" else None,
               "hauteur_mm": int(ss.w_ht) if choix == "Personnalisé" else None,
               "logo": bool(ss.w_logo), "majuscules": bool(ss.w_majuscules),
               "reglages": ss.reglages, "style": ss.style}
+    if promo:
+        params["promo"] = promo
     return historique.enregistrer(params, visuel_affiche, apercu)
 
 
@@ -182,9 +262,16 @@ def rouvrir(ident):
         ss.style["police"] = STYLE_DEFAUT["police"]
     ss.w_police = ss.style["police"]
     ss.ver += 1  # recrée les sélecteurs de couleur avec les valeurs de l'affiche
-    ss.w_prix = _prix_texte(e.get("prix"))
-    ss.w_barre_on = bool(e.get("prix_barre"))
-    ss.w_barre = _prix_texte(e.get("prix_barre"))
+    promo = e.get("promo") or {}
+    ss.w_promo_type = promo.get("type") if promo.get("type") in promos.TYPES else promos.STANDARD
+    for cle, defaut in promos.CHAMPS_DEFAUT.items():
+        ss[f"w_promo_{cle}"] = (promo.get("champs") or {}).get(cle, defaut)
+    for cle, defaut in promos.OPTIONS_DEFAUT.items():
+        ss[f"w_promo_opt_{cle}"] = (promo.get("options") or {}).get(cle, defaut)
+    standard = ss.w_promo_type == promos.STANDARD
+    ss.w_prix = _prix_texte(e.get("prix")) if standard else ""
+    ss.w_barre_on = bool(e.get("prix_barre")) and standard
+    ss.w_barre = _prix_texte(e.get("prix_barre")) if standard else ""
     ss.w_dates_on = bool(e.get("debut") or e.get("fin"))
     ss.w_debut, ss.w_fin = _date_ou_aujourdhui(e.get("debut")), _date_ou_aujourdhui(e.get("fin"))
     ss.w_format = e.get("format") if e.get("format") in list(FORMATS) + ["Personnalisé"] else "A5"
@@ -378,10 +465,19 @@ with col_form:
     majuscules = st.checkbox("Marque en majuscules", key="w_majuscules")
     nom = catalogue.nom_complet(marque, detail)
 
-    c1, c2 = st.columns(2)
-    prix_txt = c1.text_input("Prix promo (€)", placeholder="7,90", key="w_prix")
-    barre = c2.checkbox("Afficher un prix barré", key="w_barre_on")
-    prix_barre_txt = c2.text_input("Prix barré (€)", placeholder="10,50", key="w_barre") if barre else ""
+    type_promo = st.selectbox("Type de promotion", list(promos.TYPES), key="w_promo_type",
+                              format_func=lambda k: promos.TYPES[k]["libelle"], on_change=appliquer_defauts_promo,
+                              help="Par défaut : le prix promo en gros. Les autres types affichent l'offre elle-même "
+                                   "(pourcentage, montant, 2e produit, lot, produit offert…).")
+    resultat_promo, promo_enregistree = None, None
+    if type_promo == promos.STANDARD:
+        c1, c2 = st.columns(2)
+        prix_txt = c1.text_input("Prix promo (€)", placeholder="7,90", key="w_prix")
+        barre = c2.checkbox("Afficher un prix barré", key="w_barre_on")
+        prix_barre_txt = c2.text_input("Prix barré (€)", placeholder="10,50", key="w_barre") if barre else ""
+    else:
+        prix_txt, barre, prix_barre_txt = "", False, ""
+        resultat_promo, promo_enregistree = formulaire_promo(type_promo)
 
     avec_dates = st.checkbox("Afficher une plage de dates", key="w_dates_on")
     debut = fin = None
@@ -453,9 +549,13 @@ with col_form:
             else:
                 st.caption("Sauvegarde en ligne du catalogue, du style et de l'historique des affiches : activée.")
 
-prix = parse_prix(prix_txt)
-prix_barre = parse_prix(prix_barre_txt) if barre else None
-erreurs = []
+rendu_promo = resultat_promo["rendu"] if resultat_promo else None  # autre type de promotion : ce qui est dessiné
+if resultat_promo:
+    prix, prix_barre = rendu_promo["prix"] if rendu_promo else None, rendu_promo["prix_barre"] if rendu_promo else None
+else:
+    prix = parse_prix(prix_txt)
+    prix_barre = parse_prix(prix_barre_txt) if barre else None
+erreurs = list(resultat_promo["erreurs"]) if resultat_promo else []
 if prix_txt and prix is None:
     erreurs.append("Prix promo invalide.")
 if barre and prix_barre_txt and prix_barre is None:
@@ -467,15 +567,17 @@ if avec_dates and debut and fin and fin < debut:
 
 with col_apercu:
     for e in erreurs:
-        st.error(e)
-    if prix is None or not nom:
-        st.info("Renseigner la marque (ou le nom du produit) et le prix promo pour afficher l'aperçu.")
+        (st.info if e.endswith("à renseigner.") else st.error)(e)  # champ pas encore rempli : simple rappel
+    offre_prete = rendu_promo is not None if resultat_promo else prix is not None
+    if not offre_prete or not nom:
+        st.info("Renseigner la marque (ou le nom du produit) et " +
+                ("compléter l'offre" if resultat_promo else "le prix promo") + " pour afficher l'aperçu.")
     elif not erreurs:
         if visuel is None:
             st.warning("Aucun visuel : l'affiche sera générée sans image.")
         dates_txt = libelle_dates(debut, fin) if avec_dates else ""
         unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, visuel, logo,
-                                 reglages=ss.reglages, majuscules=majuscules, style=ss.style)
+                                 reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo)
         largeur_px = 900
         png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
         ev = editeur_affiche(image="data:image/png;base64," + base64.b64encode(png).decode(),
@@ -518,7 +620,8 @@ with col_apercu:
             if code_net:
                 catalogue.enregistrer(code_net, marque, detail)
                 sauvegarde.planifier("catalogue_appris.csv")
-            return enregistrer_affiche(code_net, marque, detail, prix, prix_barre, debut, fin, choix, visuel, png)
+            return enregistrer_affiche(code_net, marque, detail, prix, prix_barre, debut, fin, choix, visuel, png,
+                                       promo_enregistree)
 
         final, feuilles, par = pdf_impression(unitaire, taille, exemplaires, en_planche)
         fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", nom)[:40] or "affiche"
@@ -593,9 +696,8 @@ with onglet_hist:
                     detail_court = (e.get("detail") or "").strip().replace("\n", " ")
                     if len(detail_court) > 60:
                         detail_court = detail_court[:57].rstrip() + "…"
-                    prix_aff = _prix_texte(e["prix"]) + " €" + (
-                        f" (au lieu de {_prix_texte(e['prix_barre'])} €)" if e.get("prix_barre") else "")
-                    st.caption(f"{_md(detail_court)}  \n{prix_aff} · {e.get('format', '')} · créée le "
+                    prix_aff = promos.resume_entree(e)
+                    st.caption(f"{_md(detail_court)}  \n{_md(prix_aff)} · {e.get('format', '')} · créée le "
                                f"{historique.date_creation(e)}")
                     b_ouvrir, b_page = st.columns(2)
                     b_ouvrir.button("Rouvrir", key=f"ouv_{ident}", on_click=rouvrir, args=(ident,),
@@ -643,7 +745,7 @@ with onglet_page:
                     f"({' + '.join(str(t) for t in tailles)} affiche(s))")
         for i, e in enumerate(choisies):
             ligne, monter, descendre, retirer = st.columns([7, 1, 1, 2])
-            ligne.write(f"{i + 1}. {_md(_titre_entree(e))} – {_prix_texte(e['prix'])} €")
+            ligne.write(f"{i + 1}. {_md(_titre_entree(e))} – {_md(promos.resume_entree(e))}")
             monter.button("↑", key=f"mh_{i}", on_click=deplacer_regroupe, args=(i, -1), disabled=i == 0,
                           help="Monter")
             descendre.button("↓", key=f"mb_{i}", on_click=deplacer_regroupe, args=(i, 1),

@@ -1,7 +1,7 @@
 """Page A4 regroupant plusieurs affiches (6 au maximum par feuille), en portrait ou en paysage.
 
 Chaque feuille comporte un titre personnalisable en haut, une grille de vignettes (visuel, marque, détail,
-prix barré éventuel, prix) et le logo de la pharmacie en pied de page.
+prix barré éventuel, prix ou offre, pastille éventuelle) et le logo de la pharmacie en pied de page.
 Au-delà de 6 affiches, plusieurs feuilles sont produites, avec des vignettes réparties de façon équilibrée.
 """
 import io
@@ -15,6 +15,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
 import affiche as af
+import promos
 
 MAX_PAR_PAGE = 6
 TITRE_DEFAUT = "Promos du mois"
@@ -44,16 +45,20 @@ def _prix_depuis_texte(valeur):
         return None
 
 
-def _bloc_prix(c, prix, cx, y_bas, taille, largeur_max, st, bold, hc):
-    """Dessine le prix (avec bandeau ou filet) à partir de y_bas. Retourne le haut du bloc."""
+def _bloc_prix(c, prix, grand, kicker, cx, y_bas, taille, largeur_max, st, bold, hc):
+    """Dessine le prix (ou le texte de l'offre, avec son petit texte au-dessus), avec bandeau ou filet, à partir
+    de y_bas. Retourne le haut du bloc et le corps utilisé."""
     fond = bool(st.get("fond_prix"))
-    while (af._largeur_prix(prix, taille, bold) + (2 * PAD_X * taille if fond else 0)) > largeur_max and taille > 8:
+    taille *= af._facteur_bandeau(grand, kicker)
+    while True:
+        largeur, h_kicker = af._contenu_bandeau(prix, grand, kicker, taille, bold, hc)
+        if largeur + (2 * PAD_X * taille if fond else 0) <= largeur_max or taille <= 8:
+            break
         taille -= 1
     base = y_bas + (taille * PAD_B if fond else taille * 0.09)
-    largeur = af._largeur_prix(prix, taille, bold)
     if fond:
         x0, x1 = cx - largeur / 2 - PAD_X * taille, cx + largeur / 2 + PAD_X * taille
-        y0, y1 = base - PAD_B * taille, base + taille * hc + PAD_H * taille
+        y0, y1 = base - PAD_B * taille, base + taille * hc + h_kicker + PAD_H * taille
         c.setFillColor(HexColor(st["couleur_fond_prix"]))
         c.roundRect(x0, y0, x1 - x0, y1 - y0, 0.14 * taille, stroke=0, fill=1)
         haut = y1
@@ -61,8 +66,8 @@ def _bloc_prix(c, prix, cx, y_bas, taille, largeur_max, st, bold, hc):
         c.setStrokeColor(HexColor(st["couleur_accent"]))
         c.setLineWidth(max(1.2, taille * 0.04))
         c.line(cx - largeur / 2, base - taille * 0.07, cx + largeur / 2, base - taille * 0.07)
-        haut = base + taille * hc
-    af._dessiner_prix(c, prix, cx, base, taille, bold, HexColor(st["couleur_prix"]), hc)
+        haut = base + taille * hc + h_kicker
+    af._dessiner_bandeau(c, prix, grand, kicker, cx, base, taille, bold, HexColor(st["couleur_prix"]), hc)
     return haut, taille
 
 
@@ -102,6 +107,16 @@ def _image(c, img, x, y, w, h):
     c.drawImage(ImageReader(tampon), x + (w - dw) / 2, y + (h - dh) / 2, dw, dh)
 
 
+def _texte_sous_prix(c, texte, cx, y_bas, largeur, h, reg, couleur):
+    """Texte sous le prix (calcul de la promotion, précision), de bas en haut à partir de y_bas. Retourne le haut."""
+    if not texte:
+        return y_bas
+    lignes, t = af._ajuster_titre(texte, reg, largeur, h * 0.14, h * 0.045, max_lignes=3)
+    bloc = len(lignes) * t * 1.15
+    _lignes_centrees(c, lignes, t, reg, couleur, cx, y_bas + bloc)
+    return y_bas + bloc + h * 0.012
+
+
 def _vignette(c, x, y, w, h, e, st):
     """Vignette d'une affiche. (x, y) : coin inférieur gauche. e : entrée de l'historique, avec « _image » (PIL)."""
     reg, bold = af.polices_famille(st["police"])
@@ -118,9 +133,14 @@ def _vignette(c, x, y, w, h, e, st):
         marque, detail = detail, ""
     if e.get("majuscules", True):
         marque = marque.upper()
-    prix = _prix_depuis_texte(e.get("prix"))
-    prix_barre = _prix_depuis_texte(e.get("prix_barre"))
-    if prix is None:
+    rendu = promos.rendu_entree(e)  # autre type de promotion : texte de l'offre, pastille…
+    if rendu:
+        prix, prix_barre = rendu["prix"], rendu["prix_barre"]
+        grand, kicker, ligne, pastille = rendu["grand"], rendu["kicker"], rendu["ligne"], rendu["pastille"]
+    else:
+        prix, prix_barre = _prix_depuis_texte(e.get("prix")), _prix_depuis_texte(e.get("prix_barre"))
+        grand = kicker = ligne = pastille = ""
+    if prix is None and not grand:
         return
     fond = bool(st.get("fond_prix"))
     horizontal = w / h >= 1.05
@@ -128,8 +148,8 @@ def _vignette(c, x, y, w, h, e, st):
 
     if not horizontal:  # vignette en hauteur : visuel, marque, détail, prix barré, prix (de haut en bas)
         zone_w, cx = w - 2 * pad, x + w / 2
-        y_cur = y + pad
-        haut, tp = _bloc_prix(c, prix, cx, y_cur, h * (0.15 if fond else 0.11), zone_w, st, bold, hc)
+        y_cur = _texte_sous_prix(c, ligne, cx, y + pad, zone_w, h, reg, col_nom)
+        haut, tp = _bloc_prix(c, prix, grand, kicker, cx, y_cur, h * (0.15 if fond else 0.11), zone_w, st, bold, hc)
         y_cur = haut + h * 0.015
         if prix_barre is not None:
             tb = tp * (0.25 if fond else 0.30)
@@ -145,6 +165,9 @@ def _vignette(c, x, y, w, h, e, st):
         _lignes_centrees(c, lignes, t, bold, col_nom, cx, y_cur + bloc)
         y_cur += bloc + h * 0.015
         _image(c, e.get("_image"), x + pad, y_cur, zone_w, y + h - pad - y_cur)
+        if pastille:  # en haut à droite du visuel
+            r = af.rayon_pastille(pastille, min(w, h * 1.1), bold)
+            _pastille(c, pastille, x + w - pad - r * 0.95, y + h - pad - r * 0.95, r, st, bold, fond)
         return
 
     # vignette en largeur : visuel à gauche ; marque, détail, prix barré et prix à droite
@@ -153,8 +176,8 @@ def _vignette(c, x, y, w, h, e, st):
     tx0 = x + pad + larg_image + pad
     zone_w = x + w - pad - tx0
     cx = tx0 + zone_w / 2
-    y_cur = y + pad
-    haut, tp = _bloc_prix(c, prix, cx, y_cur, h * (0.26 if fond else 0.20), zone_w, st, bold, hc)
+    y_cur = _texte_sous_prix(c, ligne, cx, y + pad, zone_w, h, reg, col_nom)
+    haut, tp = _bloc_prix(c, prix, grand, kicker, cx, y_cur, h * (0.26 if fond else 0.20), zone_w, st, bold, hc)
     y_cur = haut + h * 0.02
     if prix_barre is not None:
         tb = tp * (0.25 if fond else 0.30)
@@ -173,6 +196,16 @@ def _vignette(c, x, y, w, h, e, st):
     _lignes_centrees(c, l_marque, t_marque, bold, col_nom, cx, haut_groupe)
     if l_detail:
         _lignes_centrees(c, l_detail, t_detail, reg, col_nom, cx, haut_groupe - bloc_m - ecart)
+    if pastille:  # en haut à gauche du visuel (la colonne de droite porte les textes)
+        r = af.rayon_pastille(pastille, min(w, h * 1.1), bold)
+        _pastille(c, pastille, x + pad + r * 0.95, y + h - pad - r * 0.95, r, st, bold, fond)
+
+
+def _pastille(c, texte, cx, cy, rayon, st, bold, fond):
+    """Pastille aux couleurs du bandeau de prix (noir sur jaune) ou, sans bandeau, de la couleur du prix."""
+    couleur_prix = HexColor(st["couleur_prix"])
+    af._pastille(c, texte, cx, cy, rayon, bold, HexColor(st["couleur_fond_prix"]) if fond else couleur_prix,
+                 couleur_prix if fond else white)
 
 
 def _pied_de_page(c, largeur_page, y, hauteur, st, bold):

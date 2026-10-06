@@ -1,7 +1,8 @@
 """Historique des affiches créées, conservées 3 mois.
 
 Chaque affiche enregistrée correspond à deux fichiers dans le dossier « historique » :
-  <identifiant>.json : réglages de l'affiche (produit, prix, dates, format, couleurs, positions) et miniature ;
+  <identifiant>.json : réglages de l'affiche (produit, prix ou type de promotion, dates, format, couleurs,
+                       positions) et miniature ;
   <identifiant>.jpg  : visuel du produit tel qu'il est imprimé (déjà nettoyé).
 
 L'identifiant se déduit du produit, du prix, des dates et du format : enregistrer à nouveau la même affiche
@@ -39,6 +40,8 @@ def identifiant(params: dict) -> str:
     """Identifiant stable : même produit, même prix, mêmes dates, même format = même affiche."""
     cles = {k: params.get(k) for k in ("code", "marque", "detail", "prix", "prix_barre", "debut", "fin", "format",
                                        "largeur_mm", "hauteur_mm")}
+    if (params.get("promo") or {}).get("type") not in (None, "standard"):
+        cles["promo"] = params["promo"]  # un autre type de promotion = une autre affiche (les anciennes ne changent pas)
     texte = json.dumps(cles, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(texte.encode("utf-8")).hexdigest()[:12]
 
@@ -92,7 +95,7 @@ def lister() -> list[dict]:
     for f in fichiers:
         try:
             e = json.loads(f.read_text(encoding="utf-8"))
-            if e.get("id") and e.get("cree") and e.get("prix"):
+            if e.get("id") and e.get("cree") and (e.get("prix") or e.get("promo")):
                 entrees.append(e)
         except Exception:
             continue  # fichier incomplet ou illisible : ignoré
