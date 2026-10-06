@@ -266,6 +266,34 @@ def rayon_pastille(texte, largeur_page, gras):
     return largeur_page * 0.10 * min(1.35, max(1.0, unite / 3.2))
 
 
+MAX_VISUELS = 4  # nombre maximal de visuels sur une affiche (par exemple une gamme de produits)
+
+
+def _disposition_rangee(images, largeur_max, hauteur_max, ecart_rel=0.03, coin=None):
+    """Plusieurs visuels sur une seule rangée : même hauteur, côte à côte, espacés d'une fraction de la largeur.
+    coin : (« droite » ou « gauche », largeur, hauteur) d'un objet posé dans un coin haut de la zone (pastille) :
+    si la rangée le recouvrirait, elle est réduite juste assez pour passer à côté ou en dessous.
+    Retourne ([(x, largeur)] depuis le bord gauche du groupe, largeur du groupe, hauteur commune)."""
+    n = len(images)
+    ecart = largeur_max * ecart_rel
+    somme = sum(im.size[0] / im.size[1] for im in images)
+    h = min(hauteur_max, (largeur_max - (n - 1) * ecart) / somme)
+    gw = h * somme + (n - 1) * ecart
+    facteur = 1.0
+    if coin:
+        cote, cw, ch = coin
+        deborde = ((largeur_max + gw) / 2 > largeur_max - cw) if cote == "droite" else ((largeur_max - gw) / 2 < cw)
+        if deborde and h > hauteur_max - ch:  # la rangée toucherait le coin : réduction minimale
+            facteur = min(1.0, max((largeur_max - 2 * cw) / gw, (hauteur_max - ch) / h, 0.4))
+    h, ecart = h * facteur, ecart * facteur
+    x, positions = 0.0, []
+    for im in images:
+        w = h * im.size[0] / im.size[1]
+        positions.append((x, w))
+        x += w + ecart
+    return positions, x - ecart, h
+
+
 def _reg(reglages, el):
     g = (reglages or {}).get(el) or {}
     return float(g.get("dx", 0.0)), float(g.get("dy", 0.0)), max(0.1, float(g.get("s", 1.0)))
@@ -275,6 +303,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
                    image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
+    image : un visuel (image PIL) ou une liste de visuels (MAX_VISUELS au maximum), placés côte à côte sur une rangée.
     promo : autre type de promotion (voir promos.composer, clé « rendu ») : kicker (petit texte au-dessus),
     grand (texte principal à la place du prix), prix, prix_barre, ligne (texte sous le prix), pastille.
     Sans promo, c'est l'affiche « prix promo » d'origine (prix et prix_barre).
@@ -294,6 +323,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     marque, detail = (marque or "").strip(), (detail or "").strip()
     if not marque and detail:
         marque, detail = detail, ""
+    images = [im for im in (image if isinstance(image, (list, tuple)) else [image]) if im is not None][:MAX_VISUELS]
     c = canvas.Canvas(sortie, pagesize=(W, H))
     c.setTitle(f"Affiche promo - {marque} {detail}".replace("\n", " ").strip())
     m = W * 0.07
@@ -362,20 +392,34 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     y_image_bas = y
     y_image_haut = y_haut
 
-    # ---- Visuel (en haut)
-    if image is not None and y_image_haut - y_image_bas > 0:
+    # ---- Visuel (en haut) : un seul, ou plusieurs côte à côte (même hauteur, sur une rangée)
+    if images and y_image_haut - y_image_bas > 0:
         dx, dy, s = _reg(reglages, "image")
         boite_h = y_image_haut - y_image_bas
-        iw, ih = image.size
-        ech = min(zone_w / iw, boite_h / ih)
-        dw, dh = iw * ech * s, ih * ech * s
         cx = W / 2 + dx * W
         cy = y_image_bas + boite_h / 2 + dy * H
-        buf = io.BytesIO()
-        image.convert("RGB").save(buf, format="JPEG", quality=92)
-        buf.seek(0)
-        c.drawImage(ImageReader(buf), cx - dw / 2, cy - dh / 2, dw, dh)
-        cadres["image"] = (cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2)
+        if len(images) == 1:
+            image = images[0]
+            iw, ih = image.size
+            ech = min(zone_w / iw, boite_h / ih)
+            dw, dh = iw * ech * s, ih * ech * s
+            buf = io.BytesIO()
+            image.convert("RGB").save(buf, format="JPEG", quality=92)
+            buf.seek(0)
+            c.drawImage(ImageReader(buf), cx - dw / 2, cy - dh / 2, dw, dh)
+            cadres["image"] = (cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2)
+        else:
+            r_pastille = rayon_pastille(texte_pastille, W, bold) if texte_pastille else 0.0
+            coin = ("droite", 1.95 * r_pastille, 1.95 * r_pastille) if texte_pastille else None
+            positions, gw, gh = _disposition_rangee(images, zone_w, boite_h, coin=coin)
+            cy = y_image_bas + gh / 2 + dy * H  # la rangée repose sur le bas de la zone, juste au-dessus de la marque
+            gauche, bas = cx - gw * s / 2, cy - gh * s / 2
+            for img, (x_rel, w_rel) in zip(images, positions):
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=92)
+                buf.seek(0)
+                c.drawImage(ImageReader(buf), gauche + x_rel * s, bas, w_rel * s, gh * s)
+            cadres["image"] = (gauche, bas, gauche + gw * s, bas + gh * s)
 
     # ---- Marque puis détail
     for el, lignes, taille, bloc, y_bloc, police in (

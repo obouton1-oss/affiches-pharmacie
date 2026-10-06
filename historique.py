@@ -1,9 +1,10 @@
 """Historique des affiches créées, conservées 3 mois.
 
-Chaque affiche enregistrée correspond à deux fichiers dans le dossier « historique » :
+Chaque affiche enregistrée correspond à plusieurs fichiers dans le dossier « historique » :
   <identifiant>.json : réglages de l'affiche (produit, prix ou type de promotion, dates, format, couleurs,
                        positions) et miniature ;
-  <identifiant>.jpg  : visuel du produit tel qu'il est imprimé (déjà nettoyé).
+  <identifiant>.jpg  : visuel du produit tel qu'il est imprimé (déjà nettoyé) ;
+  <identifiant>_2.jpg, _3.jpg, _4.jpg : autres visuels de l'affiche, s'il y en a (gamme de produits).
 
 L'identifiant se déduit du produit, du prix, des dates et du format : enregistrer à nouveau la même affiche
 (par exemple après un changement de police ou de position) remplace l'entrée existante au lieu d'en créer une autre.
@@ -23,6 +24,7 @@ from chemins import DONNEES
 
 DOSSIER = DONNEES / "historique"
 DUREE_JOURS = 90  # environ 3 mois
+MAX_VISUELS = 4  # visuels par affiche (même valeur que affiche.MAX_VISUELS)
 COTE_MAX_VISUEL = 2000  # pixels
 LARGEUR_MINIATURE = 360  # pixels
 _cache = {"signature": None, "entrees": []}
@@ -32,8 +34,13 @@ def _fichier_json(identifiant: str):
     return DOSSIER / f"{identifiant}.json"
 
 
-def _fichier_visuel(identifiant: str):
-    return DOSSIER / f"{identifiant}.jpg"
+def _nom_visuel(identifiant: str, rang: int = 1) -> str:
+    """Nom du fichier du visuel n° `rang` (1 = visuel principal)."""
+    return f"{identifiant}.jpg" if rang == 1 else f"{identifiant}_{rang}.jpg"
+
+
+def _fichier_visuel(identifiant: str, rang: int = 1):
+    return DOSSIER / _nom_visuel(identifiant, rang)
 
 
 def identifiant(params: dict) -> str:
@@ -60,24 +67,29 @@ def _ecrire_atomique(fichier, octets: bytes) -> None:
     temporaire.replace(fichier)
 
 
-def enregistrer(params: dict, visuel, apercu_png: bytes) -> str:
+def enregistrer(params: dict, visuel, apercu_png: bytes, supplementaires=()) -> str:
     """Enregistre (ou met à jour) une affiche. `params` : produit, prix, dates, format, style, positions…
-    `visuel` : image PIL (ou None). `apercu_png` : aperçu de l'affiche. Retourne l'identifiant."""
+    `visuel` : image PIL (ou None). `supplementaires` : autres visuels de l'affiche (gamme), dans l'ordre.
+    `apercu_png` : aperçu de l'affiche. Retourne l'identifiant."""
     DOSSIER.mkdir(parents=True, exist_ok=True)
     ident = identifiant(params)
+    images = [v for v in (visuel, *supplementaires) if v is not None][:MAX_VISUELS]
     entree = dict(params)
     entree.update(version=1, id=ident, cree=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  a_visuel=visuel is not None, apercu=_miniature(apercu_png))
-    if visuel is not None:
-        image = visuel.convert("RGB")
-        if max(image.size) > COTE_MAX_VISUEL:
-            image.thumbnail((COTE_MAX_VISUEL, COTE_MAX_VISUEL), Image.LANCZOS)
-        tampon = io.BytesIO()
-        image.save(tampon, format="JPEG", quality=92)
-        _ecrire_atomique(_fichier_visuel(ident), tampon.getvalue())
-        sauvegarde.planifier(f"{sauvegarde.PREFIXE_HISTORIQUE}{ident}.jpg")
-    else:
-        _fichier_visuel(ident).unlink(missing_ok=True)
+                  a_visuel=bool(images), nb_visuels=len(images), apercu=_miniature(apercu_png))
+    for rang in range(1, MAX_VISUELS + 1):
+        fichier = _fichier_visuel(ident, rang)
+        if rang <= len(images):
+            image = images[rang - 1].convert("RGB")
+            if max(image.size) > COTE_MAX_VISUEL:
+                image.thumbnail((COTE_MAX_VISUEL, COTE_MAX_VISUEL), Image.LANCZOS)
+            tampon = io.BytesIO()
+            image.save(tampon, format="JPEG", quality=92)
+            _ecrire_atomique(fichier, tampon.getvalue())
+            sauvegarde.planifier(f"{sauvegarde.PREFIXE_HISTORIQUE}{_nom_visuel(ident, rang)}")
+        elif fichier.exists():  # visuel retiré depuis le précédent enregistrement de cette affiche
+            fichier.unlink(missing_ok=True)
+            sauvegarde.supprimer(f"{sauvegarde.PREFIXE_HISTORIQUE}{_nom_visuel(ident, rang)}")
     _ecrire_atomique(_fichier_json(ident), json.dumps(entree, ensure_ascii=False).encode("utf-8"))
     sauvegarde.planifier(f"{sauvegarde.PREFIXE_HISTORIQUE}{ident}.json")
     return ident
@@ -108,9 +120,7 @@ def charger(ident: str):
     return next((e for e in lister() if e["id"] == ident), None)
 
 
-def visuel(ident: str):
-    """Visuel de l'affiche (image PIL RVB), ou None s'il n'y en a pas."""
-    fichier = _fichier_visuel(ident)
+def _lire_visuel(fichier):
     if not fichier.exists():
         return None
     try:
@@ -121,15 +131,27 @@ def visuel(ident: str):
         return None
 
 
+def visuel(ident: str):
+    """Visuel principal de l'affiche (image PIL RVB), ou None s'il n'y en a pas."""
+    return _lire_visuel(_fichier_visuel(ident))
+
+
+def visuels(ident: str) -> list:
+    """Tous les visuels de l'affiche, dans l'ordre (liste vide s'il n'y en a pas)."""
+    images = [_lire_visuel(_fichier_visuel(ident, rang)) for rang in range(1, MAX_VISUELS + 1)]
+    return [img for img in images if img is not None]
+
+
 def apercu_octets(entree: dict) -> bytes:
     return base64.b64decode(entree["apercu"])
 
 
 def supprimer(ident: str) -> None:
     _fichier_json(ident).unlink(missing_ok=True)
-    _fichier_visuel(ident).unlink(missing_ok=True)
     sauvegarde.supprimer(f"{sauvegarde.PREFIXE_HISTORIQUE}{ident}.json")
-    sauvegarde.supprimer(f"{sauvegarde.PREFIXE_HISTORIQUE}{ident}.jpg")
+    for rang in range(1, MAX_VISUELS + 1):
+        _fichier_visuel(ident, rang).unlink(missing_ok=True)
+        sauvegarde.supprimer(f"{sauvegarde.PREFIXE_HISTORIQUE}{_nom_visuel(ident, rang)}")
 
 
 def purger(jours: int = DUREE_JOURS) -> int:

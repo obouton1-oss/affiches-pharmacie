@@ -107,6 +107,25 @@ def _image(c, img, x, y, w, h):
     c.drawImage(ImageReader(tampon), x + (w - dw) / 2, y + (h - dh) / 2, dw, dh)
 
 
+def _images(c, images, x, y, w, h, sur_le_bas=False, coin=None):
+    """Dessine un ou plusieurs visuels dans la boîte (x, y, w, h) : un seul, centré ; plusieurs, côte à côte sur
+    une rangée (même hauteur), comme sur l'affiche. sur_le_bas : la rangée repose sur le bas de la boîte.
+    coin : objet posé dans un coin haut de la boîte (pastille), voir affiche._disposition_rangee."""
+    images = [im for im in (images or []) if im is not None][:af.MAX_VISUELS]
+    if len(images) <= 1:
+        _image(c, images[0] if images else None, x, y, w, h)
+        return
+    if w <= 0 or h <= 0:
+        return
+    positions, largeur_groupe, hauteur = af._disposition_rangee(images, w, h, coin=coin)
+    gauche, bas = x + (w - largeur_groupe) / 2, (y if (sur_le_bas or coin) else y + (h - hauteur) / 2)
+    for img, (x_rel, w_rel) in zip(images, positions):
+        tampon = io.BytesIO()
+        img.convert("RGB").save(tampon, format="JPEG", quality=92)
+        tampon.seek(0)
+        c.drawImage(ImageReader(tampon), gauche + x_rel, bas, w_rel, hauteur)
+
+
 def _texte_sous_prix(c, texte, cx, y_bas, largeur, h, reg, couleur):
     """Texte sous le prix (calcul de la promotion, précision), de bas en haut à partir de y_bas. Retourne le haut."""
     if not texte:
@@ -118,7 +137,9 @@ def _texte_sous_prix(c, texte, cx, y_bas, largeur, h, reg, couleur):
 
 
 def _vignette(c, x, y, w, h, e, st):
-    """Vignette d'une affiche. (x, y) : coin inférieur gauche. e : entrée de l'historique, avec « _image » (PIL)."""
+    """Vignette d'une affiche. (x, y) : coin inférieur gauche. e : entrée de l'historique, avec « _images » (liste
+    d'images PIL : le visuel principal puis les autres)."""
+    images = e.get("_images") or ([e["_image"]] if e.get("_image") is not None else [])
     reg, bold = af.polices_famille(st["police"])
     hc = af._hauteur_chiffre(bold)
     col_nom, col_sec = HexColor(st["couleur_nom"]), HexColor(st["couleur_secondaire"])
@@ -164,15 +185,19 @@ def _vignette(c, x, y, w, h, e, st):
         bloc = len(lignes) * t * 1.15
         _lignes_centrees(c, lignes, t, bold, col_nom, cx, y_cur + bloc)
         y_cur += bloc + h * 0.015
-        _image(c, e.get("_image"), x + pad, y_cur, zone_w, y + h - pad - y_cur)
+        r = af.rayon_pastille(pastille, min(w, h * 1.1), bold) if pastille else 0.0
+        _images(c, images, x + pad, y_cur, zone_w, y + h - pad - y_cur, sur_le_bas=True,
+                coin=("droite", 1.95 * r, 1.95 * r) if pastille else None)
         if pastille:  # en haut à droite du visuel
-            r = af.rayon_pastille(pastille, min(w, h * 1.1), bold)
             _pastille(c, pastille, x + w - pad - r * 0.95, y + h - pad - r * 0.95, r, st, bold, fond)
         return
 
     # vignette en largeur : visuel à gauche ; marque, détail, prix barré et prix à droite
-    larg_image = min(w * 0.40, (h - 2 * pad) * 0.95)
-    _image(c, e.get("_image"), x + pad, y + pad, larg_image, h - 2 * pad)
+    part = {0: 0.40, 1: 0.40, 2: 0.48, 3: 0.54}.get(len(images), 0.58)  # plusieurs visuels : plus de place à gauche
+    larg_image = min(w * part, (h - 2 * pad) * 0.95 * max(1, len(images)))
+    r_p = af.rayon_pastille(pastille, min(w, h * 1.1), bold) if pastille else 0.0
+    _images(c, images, x + pad, y + pad, larg_image, h - 2 * pad,
+            coin=("gauche", 1.95 * r_p, 1.95 * r_p) if pastille else None)
     tx0 = x + pad + larg_image + pad
     zone_w = x + w - pad - tx0
     cx = tx0 + zone_w / 2
@@ -226,7 +251,7 @@ def _pied_de_page(c, largeur_page, y, hauteur, st, bold):
 
 def construire_planche(sortie, titre, groupes, style=None, afficher_logo=True, orientation=PORTRAIT):
     """sortie : chemin ou objet binaire. groupes : une liste d'entrées de l'historique par feuille A4
-    (6 au maximum chacune, avec la clé « _image »). Le titre est repris sur chaque feuille.
+    (6 au maximum chacune, avec la clé « _images » : liste des visuels de l'affiche). Le titre est repris sur chaque feuille.
     orientation : « Portrait » ou « Paysage »."""
     paysage = orientation == PAYSAGE
     W, H = (A4[1], A4[0]) if paysage else A4

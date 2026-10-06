@@ -24,7 +24,7 @@ import sauvegarde
 import nettete
 import nettoyage
 from chemins import DONNEES, EN_LIGNE
-from affiche import (ELEMENTS, FORMATS, POLICES, STYLE_DEFAUT, THEMES, apercu_png, disposition_a4,
+from affiche import (ELEMENTS, FORMATS, MAX_VISUELS, POLICES, STYLE_DEFAUT, THEMES, apercu_png, disposition_a4,
                      libelle_dates, parse_prix, pdf_impression, rendu, reglages_defaut)
 
 st.set_page_config(page_title="Affiches promo", page_icon="🏷️", layout="wide")
@@ -68,7 +68,10 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("w_nettoyer", True), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
                     ("orientation_page", planche.PORTRAIT),
-                    ("filtre_hist", "")):
+                    ("filtre_hist", ""),
+                    # plusieurs visuels (gamme) et « Nouvelle affiche »
+                    ("extras", []), ("extra_uid", 0), ("extra_n", 0), ("ajout_extra", False), ("cand_extra", None),
+                    ("derniere_sel_extra", None), ("raz", 0), ("raz_attente", False), ("w_exemplaires", 1)):
     ss.setdefault(cle, defaut)
 # autres types de promotion : type choisi, champs et cases « Faire apparaître »
 for cle, defaut in ([("w_promo_type", promos.STANDARD)]
@@ -226,9 +229,10 @@ def _date_ou_aujourdhui(texte):
 
 
 def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choix, visuel_affiche, apercu,
-                        promo=None):
+                        promo=None, autres_visuels=()):
     """Enregistre l'affiche affichée à l'écran dans l'historique. Retourne son identifiant.
-    promo : autre type de promotion (type, champs, options) ; prix = prix affiché, s'il y en a un."""
+    promo : autre type de promotion (type, champs, options) ; prix = prix affiché, s'il y en a un.
+    autres_visuels : les visuels suivants de la gamme (après le visuel principal)."""
     params = {"code": code, "marque": marque, "detail": detail,
               "prix": str(prix) if prix is not None else None,
               "prix_barre": str(prix_barre) if prix_barre is not None else None,
@@ -239,7 +243,7 @@ def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choi
               "reglages": ss.reglages, "style": ss.style}
     if promo:
         params["promo"] = promo
-    return historique.enregistrer(params, visuel_affiche, apercu)
+    return historique.enregistrer(params, visuel_affiche, apercu, autres_visuels)
 
 
 def rouvrir(ident):
@@ -250,7 +254,10 @@ def rouvrir(ident):
         return
     ss.code = e.get("code") or ""
     ss.marque, ss.detail = e.get("marque", ""), e.get("detail", "")
-    ss.image = historique.visuel(ident)
+    visuels = historique.visuels(ident)
+    ss.image = visuels[0] if visuels else None
+    ss.extras = [{"uid": _nouvel_uid(), "image": v, "nom": "", "code": "", "traite": True} for v in visuels[1:]]
+    ss.ajout_extra, ss.cand_extra, ss.extra_n = False, None, ss.extra_n + 1
     ss.props, ss.props_msg, ss.journal = [], "", []
     ss.reglages = reglages_defaut()
     for el, g in (e.get("reglages") or {}).items():
@@ -285,6 +292,70 @@ def rouvrir(ident):
         ss.onglet = ONGLET_CREER
     else:
         ss.msg_hist = "Affiche rouverte : elle est prête dans l'onglet « Créer une affiche »."
+
+
+# --- Plusieurs visuels (gamme) sur une même affiche
+def _nouvel_uid():
+    ss.extra_uid += 1
+    return ss.extra_uid
+
+
+def ouvrir_ajout():
+    ss.ajout_extra, ss.cand_extra = True, None
+    ss.extra_n += 1  # champs de recherche et d'import vides
+
+
+def fermer_ajout():
+    ss.ajout_extra, ss.cand_extra = False, None
+    ss.extra_n += 1
+
+
+def ajouter_extra(img, code="", nom=""):
+    """Ajoute une image à la gamme (MAX_VISUELS - 1 au plus, en plus du visuel principal) et referme l'ajout."""
+    if len(ss.extras) < MAX_VISUELS - 1:
+        ss.extras.append({"uid": _nouvel_uid(), "image": img, "nom": nom, "code": code, "traite": False})
+        ss.traitement_a_retablir = True  # pris en compte au prochain affichage, avant les cases concernées
+    fermer_ajout()
+
+
+def retirer_extra(uid):
+    ss.extras = [x for x in ss.extras if x["uid"] != uid]
+
+
+# --- « Nouvelle affiche » : efface la saisie en cours, garde les réglages (format, police, couleurs, logo)
+def demander_raz():
+    ss.raz_attente = True
+
+
+def annuler_raz():
+    ss.raz_attente = False
+
+
+def nouvelle_affiche():
+    ss.raz += 1  # recherche et import de fichier repartent vides
+    ss.raz_attente = False
+    # produit et visuels
+    ss.code, ss.marque, ss.detail = "", "", ""
+    ss.image, ss.journal, ss.props, ss.props_msg, ss.derniere_sel = None, [], [], "", None
+    ss.extras, ss.ajout_extra, ss.cand_extra, ss.derniere_sel_extra = [], False, None, None
+    ss.televerse_vu = None
+    ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
+    ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = True, "Rapide", False
+    # prix et promotion
+    ss.w_prix, ss.w_barre_on, ss.w_barre = "", False, ""
+    ss.w_promo_type = promos.STANDARD
+    for cle, valeur in promos.CHAMPS_DEFAUT.items():
+        ss[f"w_promo_{cle}"] = valeur
+    for cle, valeur in promos.OPTIONS_DEFAUT.items():
+        ss[f"w_promo_opt_{cle}"] = valeur
+    # dates, nombre d'exemplaires, éléments déplacés
+    ss.w_dates_on, ss.w_debut, ss.w_fin = False, date.today(), date.today()
+    ss.w_exemplaires = 1
+    ss.reglages = reglages_defaut()
+    ss.element_actif = "marque"
+    ss.ver += 1
+    ss.msg_ouvert = ("Nouvelle affiche : le formulaire est vide. Le format, la police, les couleurs et le logo "
+                     "sont conservés.")
 
 
 def ajouter_regroupe(ident):
@@ -348,6 +419,115 @@ def visuel_final(img, nettoyer_on, rogne, mode_nettete="Désactivée"):
     return img, methode
 
 
+def _nom_court(texte, maxi=26):
+    texte = " ".join((texte or "").split())
+    return texte if len(texte) <= maxi else texte[:maxi - 1].rstrip() + "…"
+
+
+def _miniature_carree(img, cote=180):
+    """Miniature carrée (fond blanc, fin cadre gris) : les images de la gamme restent alignées dans la liste."""
+    from PIL import ImageDraw
+    mini = img.convert("RGB").copy()
+    mini.thumbnail((cote - 12, cote - 12), Image.LANCZOS)
+    fond = Image.new("RGB", (cote, cote), "white")
+    fond.paste(mini, ((cote - mini.width) // 2, (cote - mini.height) // 2))
+    ImageDraw.Draw(fond).rectangle((0, 0, cote - 1, cote - 1), outline="#E3E3E3")
+    return fond
+
+
+def proposer_choix_extra(cand):
+    """Visuels proposés pour l'image à ajouter (aucun visuel « site marchand » trouvé automatiquement)."""
+    options = []
+    if cand["image"] is not None:
+        options.append({"miniature": cand["image"], "image": None, "site": "Bases publiques", "legende": "Photo"})
+    for p in cand["props"]:
+        dims = f"{p['largeur']}×{p['hauteur']} px" if p["largeur"] else "taille inconnue"
+        options.append({"miniature": p["miniature"], "image": p["image"], "site": p["site"],
+                        "legende": ("Fond blanc" if p["studio"] else "Photo") + f" · {dims}"})
+    if not options:
+        st.warning(f"Aucun visuel trouvé pour {cand['nom'] or cand['code']}"
+                   + (f" ({cand['msg']})" if cand["msg"] else "") + ". Importer une image ci-dessous.")
+        return
+    st.write(f"Visuels proposés pour {cand['nom'] or cand['code']}. Vérifier que l'image correspond bien au "
+             "produit, puis la choisir :")
+    colonnes = st.columns(4)
+    for i, o in enumerate(options):
+        with colonnes[i % 4]:
+            st.image(o["miniature"], use_container_width=True)
+            st.caption(f"{o['site']}  \n{o['legende']}")
+            if st.button("Choisir", key=f"ex_choix_{ss.raz}_{ss.extra_n}_{i}"):
+                try:
+                    img = cand["image"] if o["image"] is None else ip.rogner_marges_blanches(
+                        ip.telecharger_image(o["image"]))
+                    if cand["code"]:
+                        ip.enregistrer_image(cand["code"], img)
+                    ajouter_extra(img, cand["code"], cand["nom"])
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Téléchargement impossible ({type(e).__name__}).")
+
+
+def zone_autres_images(cat, nettoyer_on, mode_nettete):
+    """« Autres images » de l'affiche (gamme de produits) : liste, retrait et ajout, jusqu'à MAX_VISUELS images au
+    total avec le visuel principal. Retourne les visuels à imprimer (images PIL) des autres produits."""
+    finaux = []
+    with st.container(border=True):
+        st.markdown(f"**Autres images sur l'affiche** · {1 + len(ss.extras)} sur {MAX_VISUELS}")
+        if not ss.extras and not ss.ajout_extra:
+            st.caption(f"Pour présenter une gamme : jusqu'à {MAX_VISUELS - 1} autres produits, affichés côte à côte "
+                       "avec le premier sur une seule rangée.")
+        if ss.extras:
+            with st.spinner("Préparation des visuels…"):
+                colonnes = st.columns(MAX_VISUELS - 1)
+                for i, ex in enumerate(ss.extras):
+                    img = ex["image"] if ex["traite"] else visuel_final(ex["image"], nettoyer_on, (0, 0, 0, 0),
+                                                                        mode_nettete)[0]
+                    finaux.append(img)
+                    with colonnes[i]:
+                        st.image(_miniature_carree(img), width=120)
+                        st.caption(_nom_court(ex["nom"] or ex["code"] or f"Image {i + 2}")
+                                   + (" · résolution faible" if min(img.size) < 600 else ""))
+                        st.button("Retirer", key=f"ex_rm_{ex['uid']}", on_click=retirer_extra, args=(ex["uid"],),
+                                  use_container_width=True, help="Retirer cette image de l'affiche")
+        if len(ss.extras) >= MAX_VISUELS - 1:
+            st.caption(f"Maximum atteint : {MAX_VISUELS} images sur l'affiche. Retirer une image pour en ajouter une autre.")
+        elif not ss.ajout_extra:
+            st.button("Ajouter une autre image", key="ex_ajouter", on_click=ouvrir_ajout, icon=":material/add:",
+                      help="Chercher un autre produit (nom ou code) ou importer une image")
+        else:
+            sel2 = recherche_produit(catalogue=cat, en_ligne=True,
+                                     libelle="Produit à ajouter (nom ou code CIP13 / EAN)",
+                                     key=f"recherche_extra_{ss.raz}_{ss.extra_n}", default=None)
+            if sel2 and sel2.get("ts") != ss.derniere_sel_extra:
+                ss.derniere_sel_extra = sel2["ts"]
+                code2 = ip.nettoyer_code(sel2["code"])
+                marque2, detail2 = catalogue.separer(sel2.get("nom", ""), sel2.get("marque", ""))
+                nom2 = catalogue.nom_complet(marque2, detail2) or code2
+                with st.spinner("Recherche du visuel…"):
+                    img2, marque_trouvee, detail_trouve, _journal = ip.rechercher(code2)
+                if not marque2 and not detail2:
+                    nom2 = catalogue.nom_complet(marque_trouvee, detail_trouve) or code2
+                if img2 is not None and ip.analyser_image(img2)["studio"]:
+                    ajouter_extra(img2, code2, nom2)  # visuel « site marchand » : pris directement
+                    st.rerun()
+                with st.spinner("Recherche d'un visuel type site marchand…"):
+                    props2, msg2 = ip.propositions_web([code2] + ([f"{nom2} {code2}"] if nom2 != code2 else []),
+                                                       nom=nom2)
+                ss.cand_extra = {"code": code2, "nom": nom2, "image": img2, "props": props2, "msg": msg2}
+            if ss.cand_extra:
+                proposer_choix_extra(ss.cand_extra)
+            fichier2 = st.file_uploader("ou importer une image depuis l'ordinateur (glisser-déposer)",
+                                        type=["png", "jpg", "jpeg", "webp"],
+                                        key=f"televerse_extra_{ss.raz}_{ss.extra_n}")
+            if fichier2 is not None:
+                cand = ss.cand_extra or {}
+                ajouter_extra(ip.vers_rgb_blanc(Image.open(fichier2)), cand.get("code", ""),
+                              cand.get("nom") or Path(fichier2.name).stem)
+                st.rerun()
+            st.button("Annuler l'ajout", key="ex_annuler", on_click=fermer_ajout)
+    return finaux
+
+
 with onglet_creer:
     if ss.get("msg_ouvert"):
         st.success(ss.pop("msg_ouvert"))
@@ -355,9 +535,22 @@ with onglet_creer:
 
 with col_form:
     cat = catalogue.charger()
+    _, col_raz = st.columns([2, 1])
+    col_raz.button("Nouvelle affiche", key="raz_demander", on_click=demander_raz, icon=":material/restart_alt:",
+                   use_container_width=True, disabled=ss.raz_attente,
+                   help="Effacer la saisie en cours pour repartir de zéro (par exemple après une erreur)")
+    if ss.raz_attente:
+        with st.container(border=True):
+            st.warning("Effacer l'affiche en cours (produit, visuels, prix, promotion, dates, éléments déplacés) ? "
+                       "Si elle n'a pas été enregistrée dans l'historique, elle sera perdue. Le format, la police, "
+                       "les couleurs et le logo sont conservés.")
+            r1_, r2_ = st.columns(2)
+            r1_.button("Oui, effacer", key="raz_confirmer", type="primary", on_click=nouvelle_affiche,
+                       use_container_width=True)
+            r2_.button("Annuler", key="raz_annuler", on_click=annuler_raz, use_container_width=True)
     sel = recherche_produit(catalogue=cat, en_ligne=True,
                             libelle="Produit (nom ou code CIP13 / EAN)",
-                            key="recherche", default=None)
+                            key=f"recherche_{ss.raz}", default=None)
 
     # Nouvelle sélection dans la liste déroulante ou code saisi + Entrée
     if sel and sel.get("ts") != ss.derniere_sel:
@@ -376,6 +569,9 @@ with col_form:
             ss.marque, ss.detail = catalogue.separer(ss.detail, marque_trouvee)
         if img is None or not ip.analyser_image(img)["studio"]:
             chercher_web()  # un visuel absent ou de type « photo » est remplacé par une proposition studio
+
+    if ss.pop("traitement_a_retablir", False):  # après « Rouvrir », un nouveau visuel est nettoyé comme d'habitude
+        retablir_traitement()
 
     code_net = ss.code
 
@@ -419,7 +615,7 @@ with col_form:
                         st.error(f"Téléchargement impossible ({type(e).__name__}).")
 
     televerse = st.file_uploader("Importer un visuel manuellement (glisser-déposer)",
-                                 type=["png", "jpg", "jpeg", "webp"])
+                                 type=["png", "jpg", "jpeg", "webp"], key=f"televerse_{ss.raz}")
     if televerse is not None:
         memoriser = st.checkbox("Mémoriser ce visuel pour ce code", value=True)
         fichier_televerse = (televerse.name, televerse.size)
@@ -457,6 +653,7 @@ with col_form:
             st.caption("Visuel de type photo : essayer « Chercher un visuel type site marchand ».")
     else:
         visuel = None
+    autres_visuels = zone_autres_images(cat, nettoyer_on, mode_nettete) if ss.image is not None else []
 
     marque = st.text_input("Marque (affichée en gros, sous la photo)", value=ss.marque)
     detail = st.text_area("Détail du produit (affiché plus petit sous la marque ; Entrée = passage à la ligne)",
@@ -517,7 +714,7 @@ with col_form:
     # --- Impression
     st.markdown("**Impression**")
     i1, i2 = st.columns(2)
-    exemplaires = i1.number_input("Nombre d'affiches à imprimer", 1, 500, 1)
+    exemplaires = i1.number_input("Nombre d'affiches à imprimer", 1, 500, key="w_exemplaires")
     par_feuille = disposition_a4(taille)[0]
     en_planche = False
     if par_feuille > 1:
@@ -576,7 +773,7 @@ with col_apercu:
         if visuel is None:
             st.warning("Aucun visuel : l'affiche sera générée sans image.")
         dates_txt = libelle_dates(debut, fin) if avec_dates else ""
-        unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, visuel, logo,
+        unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, [visuel] + autres_visuels, logo,
                                  reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo)
         largeur_px = 900
         png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
@@ -621,7 +818,7 @@ with col_apercu:
                 catalogue.enregistrer(code_net, marque, detail)
                 sauvegarde.planifier("catalogue_appris.csv")
             return enregistrer_affiche(code_net, marque, detail, prix, prix_barre, debut, fin, choix, visuel, png,
-                                       promo_enregistree)
+                                       promo_enregistree, autres_visuels)
 
         final, feuilles, par = pdf_impression(unitaire, taille, exemplaires, en_planche)
         fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", nom)[:40] or "affiche"
@@ -697,7 +894,8 @@ with onglet_hist:
                     if len(detail_court) > 60:
                         detail_court = detail_court[:57].rstrip() + "…"
                     prix_aff = promos.resume_entree(e)
-                    st.caption(f"{_md(detail_court)}  \n{_md(prix_aff)} · {e.get('format', '')} · créée le "
+                    gamme = f" · {e['nb_visuels']} visuels" if e.get("nb_visuels", 0) > 1 else ""
+                    st.caption(f"{_md(detail_court)}  \n{_md(prix_aff)} · {e.get('format', '')}{gamme} · créée le "
                                f"{historique.date_creation(e)}")
                     b_ouvrir, b_page = st.columns(2)
                     b_ouvrir.button("Rouvrir", key=f"ouv_{ident}", on_click=rouvrir, args=(ident,),
@@ -759,7 +957,7 @@ with onglet_page:
         if ss.planche_cache is None or ss.planche_cache[0] != cle:
             groupes, debut_lot = [], 0
             for taille_lot in tailles:
-                groupes.append([{**e, "_image": historique.visuel(e["id"])}
+                groupes.append([{**e, "_images": historique.visuels(e["id"])}
                                 for e in choisies[debut_lot:debut_lot + taille_lot]])
                 debut_lot += taille_lot
             with st.spinner("Mise en page…"):
