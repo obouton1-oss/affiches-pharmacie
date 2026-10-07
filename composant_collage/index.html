@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<style>
+:root{--txt:#1F2430;--bg:#fff;--bg2:#F1F3F7;--prim:#2F6FEB;--gris:#6B7280;--bord:#B9C0CC}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:transparent;font-family:"Source Sans Pro",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--txt)}
+#boite{padding:2px 2px 4px}
+#zone{display:flex;align-items:center;justify-content:center;gap:14px;min-height:84px;padding:12px 16px;text-align:center;
+  border:2px dashed var(--bord);border-radius:12px;background:var(--bg2);cursor:pointer;outline:none;
+  transition:border-color .12s,background .12s}
+#zone:hover{border-color:var(--prim)}
+#zone:focus,#zone.pret{border-color:var(--prim);border-style:solid;background:#EAF1FE}
+#zone.survol{border-color:var(--prim);border-style:solid;background:#DCE8FD}
+#zone.recu{border-color:#2E9D5B;border-style:solid;background:#EAF7EF}
+#zone.erreur{border-color:#C0392B;border-style:solid;background:#FDEDEB}
+#zone.travail{opacity:.75}
+#vignette{display:none;height:60px;max-width:90px;object-fit:contain;background:#fff;border:1px solid var(--bord);border-radius:6px}
+#zone.recu #vignette{display:block}
+#texte{min-width:0}
+#titre{font-weight:700;font-size:15px;line-height:1.3}
+#aide{font-size:13px;color:var(--gris);line-height:1.35;margin-top:2px}
+kbd{font:inherit;font-size:12px;padding:0 5px;border:1px solid var(--bord);border-bottom-width:2px;border-radius:4px;background:#fff;color:var(--txt)}
+</style></head>
+<body><div id="boite">
+<div id="zone" tabindex="0" role="button" aria-label="Zone de collage d'une image">
+  <img id="vignette" alt="">
+  <div id="texte"><div id="titre"></div><div id="aide"></div></div>
+</div>
+</div>
+<script>
+"use strict";
+const MAX_OCTETS = 6000000, COTE_MAX = 2400;
+const zone = document.getElementById("zone"), titre = document.getElementById("titre"),
+      aide = document.getElementById("aide"), vignette = document.getElementById("vignette");
+const MODE_EMPLOI = 'Cliquer ici puis <kbd>Ctrl</kbd>+<kbd>V</kbd> (<kbd>⌘</kbd>+<kbd>V</kbd> sur Mac), ou glisser l\'image dans ce cadre';
+let termine = false;   // une image a été reçue : le cadre reste vert
+
+function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data||{}), "*"); }
+function hauteur(){ post("streamlit:setFrameHeight", {height: document.getElementById("boite").offsetHeight + 4}); }
+function envoyer(v){ post("streamlit:setComponentValue", {value: Object.assign({ts: Date.now() + Math.random()}, v), dataType: "json"}); }
+
+function etat(classe, t, a, html){
+  zone.className = classe;
+  titre.textContent = t;
+  if(html) aide.innerHTML = a; else aide.textContent = a || "";
+  hauteur();
+}
+function repos(){
+  if(termine) return;
+  etat("", "Coller une image ici", MODE_EMPLOI, true);
+}
+function pret(){
+  if(termine) return;
+  etat("pret", "Prêt : collez maintenant", 'Appuyer sur <kbd>Ctrl</kbd>+<kbd>V</kbd> (<kbd>⌘</kbd>+<kbd>V</kbd> sur Mac)', true);
+}
+
+function lireFichier(f){
+  return new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => ko(r.error); r.readAsDataURL(f); });
+}
+function charger(url){
+  return new Promise((ok, ko) => { const im = new Image(); im.onload = () => ok(im); im.onerror = () => ko(new Error("illisible")); im.src = url; });
+}
+async function reduire(dataUrl){
+  const im = await charger(dataUrl);
+  const k = Math.min(1, COTE_MAX / Math.max(im.naturalWidth, im.naturalHeight));
+  const c = document.createElement("canvas");
+  c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(im, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.92);
+}
+function recu(data, w, h, origine, nom){
+  termine = true;
+  vignette.src = data;
+  etat("recu", "Image reçue (" + w + " × " + h + " px)", "Elle est utilisée dans l'outil. Pour la remplacer, coller une autre image.");
+  envoyer({donnees: data, origine, nom: nom || "image", largeur: w, hauteur: h});
+}
+async function recevoirDonnees(data, origine, nom, taille){
+  etat("travail", "Lecture de l'image…", "");
+  try{
+    if(taille > MAX_OCTETS || data.length > MAX_OCTETS * 1.4) data = await reduire(data);
+    const im = await charger(data);
+    recu(data, im.naturalWidth, im.naturalHeight, origine, nom);
+  }catch(e){
+    termine = false;
+    etat("erreur", "Image non reconnue", "Sur le site : clic droit sur l'image › « Copier l'image », puis coller ici.");
+  }
+}
+async function recevoirFichier(f){
+  try{ await recevoirDonnees(await lireFichier(f), "fichier", f.name, f.size); }
+  catch(e){ termine = false; etat("erreur", "Fichier illisible", "Essayer un autre fichier."); }
+}
+function recevoirAdresse(u){
+  termine = true;
+  vignette.removeAttribute("src");
+  etat("recu", "Adresse de l'image reçue", "L'outil télécharge l'image… (si rien ne se passe, copier l'image elle-même)");
+  envoyer({url: u, origine: "adresse"});
+}
+function traiterTexte(texte, html){
+  const adresse = (texte || "").trim().split(/\s+/)[0] || "";
+  if(/^https?:\/\/\S+$/i.test(adresse)){ recevoirAdresse(adresse); return; }
+  const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html || "");
+  if(m){
+    if(/^data:image\//i.test(m[1])){ recevoirDonnees(m[1], "page", "image", 0); return; }
+    if(/^https?:\/\//i.test(m[1])){ recevoirAdresse(m[1]); return; }
+  }
+  termine = false;
+  etat("erreur", "Aucune image dans ce qui a été collé", "Sur le site : clic droit sur l'image › « Copier l'image », puis coller ici.");
+}
+function fichierImage(dt){
+  const f = [...(dt.files || [])].find(x => x.type && x.type.startsWith("image/"));
+  if(f) return f;
+  const it = [...(dt.items || [])].find(i => i.kind === "file" && i.type && i.type.startsWith("image/"));
+  return it ? it.getAsFile() : null;
+}
+
+document.addEventListener("paste", e => {
+  const cd = e.clipboardData;
+  if(!cd) return;
+  e.preventDefault();
+  const f = fichierImage(cd);
+  if(f) recevoirFichier(f);
+  else traiterTexte(cd.getData("text/uri-list") || cd.getData("text/plain"), cd.getData("text/html"));
+});
+zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("survol"); });
+zone.addEventListener("dragleave", () => zone.classList.remove("survol"));
+zone.addEventListener("drop", e => {
+  e.preventDefault();
+  zone.classList.remove("survol");
+  const dt = e.dataTransfer;
+  if(!dt) return;
+  const f = fichierImage(dt);
+  if(f) recevoirFichier(f);
+  else traiterTexte(dt.getData("text/uri-list") || dt.getData("text/plain"), dt.getData("text/html"));
+});
+zone.addEventListener("click", () => { zone.focus(); pret(); });
+zone.addEventListener("focus", pret);
+zone.addEventListener("blur", repos);
+
+window.addEventListener("message", e => {
+  const d = e.data || {};
+  if(d.type !== "streamlit:render") return;
+  const th = d.theme;
+  if(th){
+    const r = document.documentElement.style;
+    r.setProperty("--txt", th.textColor); r.setProperty("--bg", th.backgroundColor);
+    r.setProperty("--bg2", th.secondaryBackgroundColor);
+    if(th.primaryColor) r.setProperty("--prim", th.primaryColor);
+  }
+  hauteur();
+});
+post("streamlit:componentReady", {apiVersion: 1});
+repos();
+</script></body></html>
