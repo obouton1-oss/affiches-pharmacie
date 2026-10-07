@@ -8,6 +8,9 @@ déplacé et redimensionné
 via `reglages = {element: {"dx": ..., "dy": ..., "s": ...}}` :
   dx, dy : déplacement en fraction de la largeur / hauteur de la page (dy positif = vers le haut)
   s      : facteur de taille (1 = taille automatique)
+Orientation : une page plus large que haute (voir est_paysage) est mise en page « en paysage » : le visuel (ou les
+visuels) occupe la colonne de gauche, les textes, le prix et le logo la colonne de droite, centrés en hauteur.
+Une page en portrait garde la mise en page d'origine (de haut en bas, comme ci-dessus).
 """
 import io
 import re
@@ -27,6 +30,20 @@ GRIS = HexColor("#6B6B6B")
 LOGO = Path(__file__).parent / "logo.png"
 
 FORMATS = {"A4": A4, "A5": A5, "A6": A6}
+SEUIL_PAYSAGE = 1.05  # rapport largeur / hauteur à partir duquel l'affiche est mise en page en paysage
+
+
+def est_paysage(taille_page) -> bool:
+    """Vrai si la page est nettement plus large que haute (mise en page en paysage)."""
+    return taille_page[0] >= taille_page[1] * SEUIL_PAYSAGE
+
+
+def orienter(taille_page, paysage: bool):
+    """Page (largeur, hauteur) en portrait ou en paysage : le petit côté en largeur ou en hauteur."""
+    petit, grand = sorted(taille_page)
+    return (grand, petit) if paysage else (petit, grand)
+
+
 ELEMENTS = {"image": "Visuel", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
             "prix": "Prix", "ligne": "Texte sous le prix", "pastille": "Pastille", "dates": "Dates", "logo": "Logo"}
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
@@ -136,18 +153,40 @@ def _lignes_auto(texte, police, taille, largeur_max):
     return lignes
 
 
-def _ajuster_titre(texte, police, largeur, hauteur, taille_max, max_lignes=3):
-    """Si le texte contient des retours à la ligne, ils sont respectés tels quels."""
+def _equilibrer(texte, police, taille, largeur, nb_lignes):
+    """Mêmes mots, même nombre de lignes, mais lignes de longueurs voisines (au lieu d'un dernier mot isolé)."""
+    mots = [m for m in re.split(r"[ \t\r\n]+", texte) if m]
+    bas = max((stringWidth(m, police, taille) for m in mots), default=0.0)
+    haut = largeur
+    for _ in range(24):
+        milieu = (bas + haut) / 2
+        if len(_lignes_auto(texte, police, taille, milieu)) <= nb_lignes:
+            haut = milieu
+        else:
+            bas = milieu
+    return _lignes_auto(texte, police, taille, haut)
+
+
+def _ajuster_titre(texte, police, largeur, hauteur, taille_max, max_lignes=3, equilibre=False):
+    """Si le texte contient des retours à la ligne, ils sont respectés tels quels.
+    equilibre : répartit les mots de façon régulière sur les lignes (affiches en paysage)."""
     forcees = [l.strip() for l in texte.split("\n") if l.strip()]
     manuel = len(forcees) > 1
     taille = taille_max
     while taille > 6:
-        lignes = forcees if manuel else _lignes_auto(texte.replace("\n", " "), police, taille, largeur)
+        if manuel and equilibre:  # en paysage (colonne étroite), une ligne imposée trop longue est elle-même coupée
+            lignes = [p for l in forcees for p in _lignes_auto(l, police, taille, largeur)]
+        else:
+            lignes = forcees if manuel else _lignes_auto(texte.replace("\n", " "), police, taille, largeur)
         if ((manuel or len(lignes) <= max_lignes) and len(lignes) * taille * 1.15 <= hauteur
                 and all(stringWidth(l, police, taille) <= largeur for l in lignes)):
+            if equilibre and not manuel and len(lignes) > 1:
+                lignes = _equilibrer(texte.replace("\n", " "), police, taille, largeur, len(lignes))
             return lignes, taille
         taille -= 1
-    return (forcees if manuel else _lignes_auto(texte, police, 6, largeur)), 6
+    if manuel:
+        return ([p for l in forcees for p in _lignes_auto(l, police, 6, largeur)] if equilibre else forcees), 6
+    return _lignes_auto(texte, police, 6, largeur), 6
 
 
 def _prix_parts(p: Decimal):
@@ -294,6 +333,44 @@ def _disposition_rangee(images, largeur_max, hauteur_max, ecart_rel=0.03, coin=N
     return positions, x - ecart, h
 
 
+def _disposition_auto(images, largeur_max, hauteur_max, ecart_rel=0.03):
+    """Plusieurs visuels dans une colonne (affiche en paysage) : une seule rangée, ou une grille de 1 à n-1 colonnes
+    (2 visuels l'un sous l'autre, 4 visuels en 2 x 2…), selon ce qui donne les plus grands visuels.
+    Retourne ([(x, y, largeur, hauteur)] depuis le coin bas-gauche du groupe, largeur du groupe, hauteur du groupe)."""
+    n = len(images)
+    ecart = min(largeur_max, hauteur_max) * ecart_rel
+    pos_r, gw_r, h_r = _disposition_rangee(images, largeur_max, hauteur_max, ecart_rel)
+    rangee = [(x, 0.0, w, h_r) for x, w in pos_r]
+    meilleur, aire_meilleure = (rangee, gw_r, h_r), sum(w * h_r for _, w in pos_r)
+    aire_rangee = aire_meilleure
+    for cols in range(1, n):
+        lignes = -(-n // cols)
+        cell_w = (largeur_max - (cols - 1) * ecart) / cols
+        cell_h = (hauteur_max - (lignes - 1) * ecart) / lignes
+        taille = []  # taille de chaque visuel, à l'échelle de sa cellule
+        for im in images:
+            ech = min(cell_w / im.size[0], cell_h / im.size[1])
+            taille.append((im.size[0] * ech, im.size[1] * ech))
+        rangs = [list(range(r * cols, min(n, (r + 1) * cols))) for r in range(lignes)]
+        larg_rang = [sum(taille[i][0] for i in rg) + (len(rg) - 1) * ecart for rg in rangs]
+        haut_rang = [max(taille[i][1] for i in rg) for rg in rangs]
+        gw, gh = max(larg_rang), sum(haut_rang) + (lignes - 1) * ecart
+        rects, y_haut_rang = [None] * n, gh
+        for rg, lr, hr in zip(rangs, larg_rang, haut_rang):
+            y_haut_rang -= hr
+            x = (gw - lr) / 2  # ligne centrée ; visuels alignés sur la base de la ligne
+            for i in rg:
+                rects[i] = (x, y_haut_rang, taille[i][0], taille[i][1])
+                x += taille[i][0] + ecart
+            y_haut_rang -= ecart
+        aire = sum(w * h for _, _, w, h in rects)
+        if aire > aire_meilleure:
+            meilleur, aire_meilleure = (rects, gw, gh), aire
+    if aire_meilleure < aire_rangee * 1.12:  # à peu près équivalent : la rangée, comme sur l'affiche en portrait
+        return rangee, gw_r, h_r
+    return meilleur
+
+
 def _reg(reglages, el):
     g = (reglages or {}).get(el) or {}
     return float(g.get("dx", 0.0)), float(g.get("dy", 0.0)), max(0.1, float(g.get("s", 1.0)))
@@ -307,8 +384,11 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     promo : autre type de promotion (voir promos.composer, clé « rendu ») : kicker (petit texte au-dessus),
     grand (texte principal à la place du prix), prix, prix_barre, ligne (texte sous le prix), pastille.
     Sans promo, c'est l'affiche « prix promo » d'origine (prix et prix_barre).
+    Une page plus large que haute (est_paysage) est mise en page en paysage : visuel(s) à gauche, textes à droite.
     Retourne les cadres des éléments, normalisés (x0, y0, x1, y1) depuis le coin haut-gauche."""
     W, H = taille_page
+    paysage = est_paysage(taille_page)
+    S, L = (H, W) if paysage else (W, H)  # petit côté, grand côté : base des tailles de texte et des marges
     promo = promo or {}
     if promo:
         prix, prix_barre = promo.get("prix"), promo.get("prix_barre")
@@ -326,90 +406,138 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     images = [im for im in (image if isinstance(image, (list, tuple)) else [image]) if im is not None][:MAX_VISUELS]
     c = canvas.Canvas(sortie, pagesize=(W, H))
     c.setTitle(f"Affiche promo - {marque} {detail}".replace("\n", " ").strip())
-    m = W * 0.07
+    m = S * 0.07
     zone_w = W - 2 * m
-    y_haut = H - W * 0.05
+    y_haut = H - S * 0.05
+    cx_t, cx_img, larg_img = W / 2, W / 2, zone_w  # centre des textes, centre et largeur de la zone du visuel
     cadres = {}  # coordonnées PDF (origine en bas à gauche)
 
-    # ---- Textes : marque (grande) puis détail (plus petit)
+    # ---- Paysage : colonne de gauche = visuel(s), colonne de droite = textes, prix et logo
+    disposition = None  # plusieurs visuels : (positions, largeur, hauteur) du groupe
+    y_bas_img, y_haut_img = S * 0.05, y_haut
+    if paysage and texte_pastille:  # la pastille occupe le coin haut gauche : le visuel se place en dessous
+        y_haut_img = y_haut - 1.95 * rayon_pastille(texte_pastille, S, bold) - S * 0.01
+    if paysage and images:
+        boite_h0 = y_haut_img - y_bas_img
+        zone_img = (W - 2 * m) * min(0.58, 0.47 + 0.03 * len(images))  # largeur maximale de la colonne du visuel
+        if len(images) == 1:
+            largeur_groupe = min(zone_img, boite_h0 * images[0].size[0] / images[0].size[1])
+        else:
+            disposition = _disposition_auto(images, zone_img, boite_h0)
+            largeur_groupe = disposition[1]
+        # la colonne s'adapte au visuel : un tube étroit laisse plus de place au texte, un pot carré en prend davantage
+        larg_img = min(zone_img, max(largeur_groupe + (W - 2 * m) * 0.04, (W - 2 * m) * 0.34))
+        cx_img = m + larg_img / 2
+        x_texte = m + larg_img + m
+        zone_w = W - m - x_texte
+        cx_t = x_texte + zone_w / 2
+
     texte_marque = marque or " "
     if majuscules:
         texte_marque = texte_marque.upper()
-    if detail:
-        l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, H * 0.12, H * 0.058, max_lignes=2)
-        l_detail, t_detail = _ajuster_titre(detail, reg, zone_w, H * 0.12, H * 0.038, max_lignes=3)
-    else:
-        l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, H * 0.15, H * 0.058, max_lignes=3)
-        l_detail, t_detail = [], 0.0
-    bloc_m = len(l_marque) * t_marque * 1.15
-    bloc_d = len(l_detail) * t_detail * 1.15
-
-    # ---- Positions automatiques (de bas en haut) : logo, dates, prix, prix barré, détail, marque, visuel
-    pied_h = H * 0.05
-    y_pied = H * 0.03  # le logo est collé plus bas que les marges de la page
     logo_img = ImageReader(str(LOGO)) if (afficher_logo and LOGO.exists()) else None
-    cy_logo = y_pied + pied_h / 2
-    y = y_pied + pied_h + H * 0.015
-
-    y_dates = y
-    taille_d = 0.0
-    if texte_dates:
-        taille_d = H * 0.022
-        while stringWidth(texte_dates, reg, taille_d) > zone_w and taille_d > 6:
-            taille_d -= 0.5
-        y += taille_d + H * 0.022
-
-    # texte sous le prix (calcul de la promotion, précision) : juste au-dessus des dates
-    y_ligne, bloc_l, l_ligne, t_ligne = y, 0.0, [], 0.0
-    if texte_ligne:
-        l_ligne, t_ligne = _ajuster_titre(texte_ligne, reg, zone_w, H * 0.10, H * 0.028, max_lignes=3)
-        bloc_l = len(l_ligne) * t_ligne * 1.15
-        y += bloc_l + H * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
-
     fond = bool(st.get("fond_prix"))
     pad_x, pad_b, pad_h = 0.20, 0.12, 0.16  # marges du bandeau, en fraction du corps du prix
-    taille_p = H * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
+
+    k = 1.0  # facteur de réduction des textes : en paysage, ils sont réduits jusqu'à tenir dans la hauteur
     while True:
-        w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, bold, hc)
-        if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
+        g = L * k  # base des tailles de texte et des espaces (en portrait : la hauteur de la page)
+
+        # ---- Textes : marque (grande) puis détail (plus petit)
+        if detail:
+            l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, g * 0.12, g * 0.058, max_lignes=2,
+                                                equilibre=paysage)
+            l_detail, t_detail = _ajuster_titre(detail, reg, zone_w, g * 0.12, g * 0.038, max_lignes=3,
+                                                equilibre=paysage)
+        else:
+            l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, g * 0.15, g * 0.058, max_lignes=3,
+                                                equilibre=paysage)
+            l_detail, t_detail = [], 0.0
+        bloc_m = len(l_marque) * t_marque * 1.15
+        bloc_d = len(l_detail) * t_detail * 1.15
+
+        # ---- Positions automatiques (de bas en haut) : logo, dates, prix, prix barré, détail, marque, visuel
+        pied_h = g * 0.05
+        y_pied = y_bas_img if paysage else g * 0.03  # en portrait, le logo est collé plus bas que les marges
+        cy_logo = y_pied + pied_h / 2
+        y = y_pied + pied_h + g * 0.015
+
+        y_dates = y
+        taille_d = 0.0
+        if texte_dates:
+            taille_d = g * 0.022
+            while stringWidth(texte_dates, reg, taille_d) > zone_w and taille_d > 6:
+                taille_d -= 0.5
+            y += taille_d + g * 0.022
+
+        # texte sous le prix (calcul de la promotion, précision) : juste au-dessus des dates
+        y_ligne, bloc_l, l_ligne, t_ligne = y, 0.0, [], 0.0
+        if texte_ligne:
+            l_ligne, t_ligne = _ajuster_titre(texte_ligne, reg, zone_w, g * 0.10, g * 0.028, max_lignes=3,
+                                              equilibre=paysage)
+            bloc_l = len(l_ligne) * t_ligne * 1.15
+            y += bloc_l + g * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
+
+        taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
+        while True:
+            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, bold, hc)
+            if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
+                break
+            taille_p -= 1
+        y_prix = y + (taille_p * pad_b if fond else 0)
+        y = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0) + g * 0.02
+
+        taille_b = 0.0
+        y_barre = y
+        if prix_barre is not None:
+            taille_b = taille_p * (0.25 if fond else 0.30)
+            y_barre = y + taille_b * 0.3  # place sous le texte pour le bout du trait diagonal
+            y = y_barre + taille_b * 0.95 + g * 0.015
+
+        y_detail = y + g * 0.005
+        if detail:
+            y = y_detail + bloc_d + g * 0.012
+        y_marque = y
+        y = y_marque + bloc_m + g * 0.018
+        if not paysage or y_marque + bloc_m <= y_haut or k <= 0.3:
             break
-        taille_p -= 1
-    y_prix = y + (taille_p * pad_b if fond else 0)
-    y = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0) + H * 0.02
+        k *= 0.96  # en paysage : le bloc de textes dépasse en hauteur, on le réduit un peu et on recommence
 
-    taille_b = 0.0
-    y_barre = y
-    if prix_barre is not None:
-        taille_b = taille_p * (0.25 if fond else 0.30)
-        y_barre = y + taille_b * 0.3  # place sous le texte pour le bout du trait diagonal
-        y = y_barre + taille_b * 0.95 + H * 0.015
+    if paysage:  # bloc de textes centré en hauteur entre le logo et le haut de la page
+        decalage = max(0.0, y_haut - (y_marque + bloc_m)) / 2
+        y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque = (
+            v + decalage for v in (y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque))
+        y_image_bas, y_image_haut = y_bas_img, y_haut_img
+    else:
+        y_image_bas, y_image_haut = y, y_haut
 
-    y_detail = y + H * 0.005
-    if detail:
-        y = y_detail + bloc_d + H * 0.012
-    y_marque = y
-    y = y_marque + bloc_m + H * 0.018
-    y_image_bas = y
-    y_image_haut = y_haut
-
-    # ---- Visuel (en haut) : un seul, ou plusieurs côte à côte (même hauteur, sur une rangée)
+    # ---- Visuel (en haut, ou à gauche en paysage) : un seul, ou plusieurs (rangée ; grille en paysage)
     if images and y_image_haut - y_image_bas > 0:
         dx, dy, s = _reg(reglages, "image")
         boite_h = y_image_haut - y_image_bas
-        cx = W / 2 + dx * W
+        cx = cx_img + dx * W
         cy = y_image_bas + boite_h / 2 + dy * H
         if len(images) == 1:
             image = images[0]
             iw, ih = image.size
-            ech = min(zone_w / iw, boite_h / ih)
+            ech = min(larg_img / iw, boite_h / ih)
             dw, dh = iw * ech * s, ih * ech * s
             buf = io.BytesIO()
             image.convert("RGB").save(buf, format="JPEG", quality=92)
             buf.seek(0)
             c.drawImage(ImageReader(buf), cx - dw / 2, cy - dh / 2, dw, dh)
             cadres["image"] = (cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2)
+        elif paysage:  # visuels en une rangée ou en grille, au mieux, centrés dans leur colonne
+            rects, gw, gh = disposition
+            gauche, bas = cx - gw * s / 2, cy - gh * s / 2
+            for img, (x_rel, y_rel, w_rel, h_rel) in zip(images, rects):
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=92)
+                buf.seek(0)
+                c.drawImage(ImageReader(buf), gauche + x_rel * s, bas + y_rel * s, w_rel * s, h_rel * s)
+            cadres["image"] = (gauche, bas, gauche + gw * s, bas + gh * s)
         else:
-            r_pastille = rayon_pastille(texte_pastille, W, bold) if texte_pastille else 0.0
+            r_pastille = rayon_pastille(texte_pastille, S, bold) if texte_pastille else 0.0
             coin = ("droite", 1.95 * r_pastille, 1.95 * r_pastille) if texte_pastille else None
             positions, gw, gh = _disposition_rangee(images, zone_w, boite_h, coin=coin)
             cy = y_image_bas + gh / 2 + dy * H  # la rangée repose sur le bas de la zone, juste au-dessus de la marque
@@ -430,7 +558,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         dx, dy, s = _reg(reglages, el)
         t = taille * s
         hb = len(lignes) * t * 1.15
-        cx = W / 2 + dx * W
+        cx = cx_t + dx * W
         cy = (y_bloc + bloc / 2) + dy * H
         haut = cy + hb / 2
         c.setFillColor(col_nom)
@@ -446,7 +574,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         ent, cts = _prix_parts(prix_barre)
         txt = f"{ent},{cts or '00'} €" if cts else f"{ent} €"
         t = taille_b * s
-        cx = W / 2 + dx * W
+        cx = cx_t + dx * W
         base = (y_barre + taille_b * 0.3) + dy * H - t * 0.3
         wt = stringWidth(txt, reg, t)
         c.setFillColor(col_sec)
@@ -461,7 +589,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     # ---- Prix (ou texte principal de l'offre), avec son petit texte au-dessus
     dx, dy, s = _reg(reglages, "prix")
     p = taille_p * s
-    cx = W / 2 + dx * W
+    cx = cx_t + dx * W
     wp, h_kicker_p = _contenu_bandeau(prix, grand, kicker, p, bold, hc)
     base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
     if fond:  # bandeau coloré derrière le prix
@@ -472,7 +600,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["prix"] = (bx0, by0, bx1, by1)
     else:
         c.setStrokeColor(col_accent)
-        c.setLineWidth(max(1.5, H * 0.004 * s))
+        c.setLineWidth(max(1.5, g * 0.004 * s))
         c.line(cx - wp / 2, base - p * 0.07, cx + wp / 2, base - p * 0.07)
         cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc + h_kicker_p)
     _dessiner_bandeau(c, prix, grand, kicker, cx, base, p, bold, col_prix, hc)
@@ -482,7 +610,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         dx, dy, s = _reg(reglages, "ligne")
         t = t_ligne * s
         hb = len(l_ligne) * t * 1.15
-        cx = W / 2 + dx * W
+        cx = cx_t + dx * W
         haut = (y_ligne + bloc_l / 2) + dy * H + hb / 2
         c.setFillColor(col_nom)
         c.setFont(reg, t)
@@ -491,12 +619,14 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         lmax = max(stringWidth(l, reg, t) for l in l_ligne)
         cadres["ligne"] = (cx - lmax / 2, haut - hb, cx + lmax / 2, haut)
 
-    # ---- Pastille (« –25 % »), en haut à droite du visuel
+    # ---- Pastille (« –25 % »), en haut à droite du visuel (en paysage : en haut à gauche, la colonne de droite
+    # porte les textes)
     if texte_pastille:
         dx, dy, s = _reg(reglages, "pastille")
-        r0 = rayon_pastille(texte_pastille, W, bold)
+        r0 = rayon_pastille(texte_pastille, S, bold)
         r = r0 * s
-        cx, cy = W - m - r0 * 0.95 + dx * W, y_haut - r0 * 0.95 + dy * H
+        cx_p = (m + r0 * 0.95) if paysage else (W - m - r0 * 0.95)
+        cx, cy = cx_p + dx * W, y_haut - r0 * 0.95 + dy * H
         _pastille(c, texte_pastille, cx, cy, r, bold,
                   HexColor(st["couleur_fond_prix"]) if fond else col_prix, col_prix if fond else white)
         cadres["pastille"] = (cx - r, cy - r, cx + r, cy + r)
@@ -505,7 +635,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     if texte_dates:
         dx, dy, s = _reg(reglages, "dates")
         t = taille_d * s
-        cx = W / 2 + dx * W
+        cx = cx_t + dx * W
         base = (y_dates + taille_d * 0.3) + dy * H - t * 0.3
         c.setFillColor(col_sec)
         c.setFont(reg, t)
@@ -519,11 +649,14 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         lw, lh = logo_img.getSize()
         h_logo = pied_h * s
         w_logo = h_logo * lw / lh
-        ts = H * 0.017 * s
-        ecart = W * 0.015 * s
+        ts = g * 0.017 * s
+        ecart = S * 0.015 * s
         tw = stringWidth("Pharmacie Bouton", bold, ts)
         gw = w_logo + ecart + tw
-        cx = W / 2 + dx * W
+        if paysage and gw > zone_w:  # colonne étroite : le logo et le nom se réduisent pour y tenir
+            f = zone_w / gw
+            h_logo, w_logo, ts, ecart, tw, gw = h_logo * f, w_logo * f, ts * f, ecart * f, tw * f, gw * f
+        cx = cx_t + dx * W
         cy = cy_logo + dy * H
         x_g = cx - gw / 2
         c.drawImage(logo_img, x_g, cy - h_logo / 2, w_logo, h_logo, mask="auto")

@@ -1,12 +1,12 @@
 """Historique des affiches créées, conservées 3 mois.
 
 Chaque affiche enregistrée correspond à plusieurs fichiers dans le dossier « historique » :
-  <identifiant>.json : réglages de l'affiche (produit, prix ou type de promotion, dates, format, couleurs,
-                       positions) et miniature ;
+  <identifiant>.json : réglages de l'affiche (produit, prix ou type de promotion, dates, format et orientation
+                       (« orientation » : « Paysage », absent pour le portrait), couleurs, positions) et miniature ;
   <identifiant>.jpg  : visuel du produit tel qu'il est imprimé (déjà nettoyé) ;
   <identifiant>_2.jpg, _3.jpg, _4.jpg : autres visuels de l'affiche, s'il y en a (gamme de produits).
 
-L'identifiant se déduit du produit, du prix, des dates et du format : enregistrer à nouveau la même affiche
+L'identifiant se déduit du produit, du prix, des dates, du format et de l'orientation : enregistrer à nouveau la même affiche
 (par exemple après un changement de police ou de position) remplace l'entrée existante au lieu d'en créer une autre.
 Les affiches de plus de DUREE_JOURS jours sont supprimées automatiquement.
 Sur l'hébergement en ligne, les fichiers sont recopiés dans la sauvegarde privée (voir sauvegarde.py).
@@ -49,6 +49,8 @@ def identifiant(params: dict) -> str:
                                        "largeur_mm", "hauteur_mm")}
     if (params.get("promo") or {}).get("type") not in (None, "standard"):
         cles["promo"] = params["promo"]  # un autre type de promotion = une autre affiche (les anciennes ne changent pas)
+    if params.get("orientation"):
+        cles["orientation"] = params["orientation"]  # paysage = une autre affiche que le portrait du même produit
     texte = json.dumps(cles, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(texte.encode("utf-8")).hexdigest()[:12]
 

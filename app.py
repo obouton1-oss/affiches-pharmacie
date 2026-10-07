@@ -26,7 +26,7 @@ import nettete
 import nettoyage
 from chemins import DONNEES, EN_LIGNE
 from affiche import (ELEMENTS, FORMATS, MAX_VISUELS, POLICES, STYLE_DEFAUT, THEMES, apercu_png, disposition_a4,
-                     libelle_dates, parse_prix, pdf_impression, rendu, reglages_defaut)
+                     libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut)
 
 st.set_page_config(page_title="Affiches promo", page_icon="🏷️", layout="wide")
 habillage.appliquer()  # feuille de style (aussi pour la page de mot de passe)
@@ -71,7 +71,7 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     # valeurs de départ des champs du formulaire (modifiables aussi par « Rouvrir » dans l'historique)
                     ("w_prix", ""), ("w_barre_on", False), ("w_barre", ""), ("w_dates_on", False),
                     ("w_debut", date.today()), ("w_fin", date.today()), ("w_format", "A5"),
-                    ("w_lg", 100), ("w_ht", 150), ("w_logo", True), ("w_majuscules", True),
+                    ("w_paysage", False), ("w_lg", 100), ("w_ht", 150), ("w_logo", True), ("w_majuscules", True),
                     ("w_nettoyer", True), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
                     ("orientation_page", planche.PORTRAIT),
@@ -220,6 +220,13 @@ def formulaire_promo(type_):
     return res, {"type": type_, "champs": enregistre, "options": options_enregistrees}
 
 
+def orientation_changee():
+    """Au passage portrait <-> paysage : la mise en page change, les éléments déplacés à la main sont remis en place."""
+    ss.reglages = reglages_defaut()
+    ss.element_actif = "marque"
+    ss.ver += 1
+
+
 def retablir_traitement():
     """Après « Rouvrir », le nettoyage et la netteté sont désactivés (le visuel enregistré est déjà traité) :
     on les réactive dès qu'un nouveau visuel est choisi."""
@@ -241,10 +248,11 @@ def _date_ou_aujourdhui(texte):
 
 
 def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choix, visuel_affiche, apercu,
-                        promo=None, autres_visuels=()):
+                        promo=None, autres_visuels=(), paysage=False):
     """Enregistre l'affiche affichée à l'écran dans l'historique. Retourne son identifiant.
     promo : autre type de promotion (type, champs, options) ; prix = prix affiché, s'il y en a un.
-    autres_visuels : les visuels suivants de la gamme (après le visuel principal)."""
+    autres_visuels : les visuels suivants de la gamme (après le visuel principal).
+    paysage : affiche en paysage (formats A4, A5, A6 ; un format personnalisé garde ses dimensions)."""
     params = {"code": code, "marque": marque, "detail": detail,
               "prix": str(prix) if prix is not None else None,
               "prix_barre": str(prix_barre) if prix_barre is not None else None,
@@ -255,6 +263,8 @@ def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choi
               "reglages": ss.reglages, "style": ss.style}
     if promo:
         params["promo"] = promo
+    if paysage:
+        params["orientation"] = "Paysage"  # absent pour le portrait : les anciennes affiches gardent leur identifiant
     return historique.enregistrer(params, visuel_affiche, apercu, autres_visuels)
 
 
@@ -296,6 +306,7 @@ def rouvrir(ident):
     ss.w_dates_on = bool(e.get("debut") or e.get("fin"))
     ss.w_debut, ss.w_fin = _date_ou_aujourdhui(e.get("debut")), _date_ou_aujourdhui(e.get("fin"))
     ss.w_format = e.get("format") if e.get("format") in list(FORMATS) + ["Personnalisé"] else "A5"
+    ss.w_paysage = e.get("orientation") == "Paysage" and ss.w_format in FORMATS
     ss.w_lg, ss.w_ht = int(e.get("largeur_mm") or 100), int(e.get("hauteur_mm") or 150)
     ss.w_logo, ss.w_majuscules = bool(e.get("logo", True)), bool(e.get("majuscules", True))
     ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = False, "Désactivée", True
@@ -860,14 +871,23 @@ with col_form:
     with st.container(key="etape_3"):
         habillage.titre_etape(3, "Mise en page", "Format, logo, police et couleurs. Les éléments se déplacent "
                                                  "aussi sur l'aperçu.")
-        f1, f2, f3 = st.columns([2, 1, 1])
+        f1, f2 = st.columns([2, 3], vertical_alignment="bottom")
         choix = f1.selectbox("Format", list(FORMATS) + ["Personnalisé"], key="w_format")
         if choix == "Personnalisé":
-            lg = f2.number_input("Largeur (mm)", 50, 600, key="w_lg")
-            ht = f3.number_input("Hauteur (mm)", 50, 900, key="w_ht")
+            with f2:
+                f2a, f2b = st.columns(2)
+                lg = f2a.number_input("Largeur (mm)", 50, 600, key="w_lg")
+                ht = f2b.number_input("Hauteur (mm)", 50, 900, key="w_ht")
             taille = (lg * mm, ht * mm)
+            paysage = False  # l'orientation découle des dimensions saisies (largeur supérieure à la hauteur = paysage)
         else:
-            taille = FORMATS[choix]
+            paysage = f2.checkbox("Affiche en paysage (à l'horizontale)", key="w_paysage",
+                                  on_change=orientation_changee,
+                                  help="Le visuel passe à gauche, la marque, le prix et le logo à droite ; la mise en "
+                                       "page s'adapte toute seule. Les éléments déplacés à la main sont remis en place "
+                                       "quand on change d'orientation.")
+            taille = orienter(FORMATS[choix], paysage)
+        format_txt = f"{choix} paysage" if paysage else choix
         logo = st.checkbox("Afficher le logo", key="w_logo")
 
         with st.expander("Police et couleurs"):
@@ -984,12 +1004,12 @@ with col_apercu:
                     catalogue.enregistrer(code_net, marque, detail)
                     sauvegarde.planifier("catalogue_appris.csv")
                 return enregistrer_affiche(code_net, marque, detail, prix, prix_barre, debut, fin, choix, visuel, png,
-                                           promo_enregistree, autres_visuels)
+                                           promo_enregistree, autres_visuels, paysage)
 
             final, feuilles, par = pdf_impression(unitaire, taille, exemplaires, en_planche)
             fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", nom)[:40] or "affiche"
             if st.download_button("Télécharger le PDF à imprimer", final,
-                                  f"affiche_{fichier}_{choix}_x{exemplaires}.pdf",
+                                  f"affiche_{fichier}_{format_txt.replace(' ', '_')}_x{exemplaires}.pdf",
                                   "application/pdf", type="primary", use_container_width=True,
                                   icon=":material/download:"):
                 memoriser_affiche()  # l'affiche téléchargée est aussi conservée dans l'historique
@@ -1033,7 +1053,7 @@ with slot_feuille:
         with st.expander("Feuille d'impression"):
             st.image(apercu_png(final), use_container_width=True)
             st.caption(f"{exemplaires} affiche(s) → {feuilles} "
-                       f"{'feuille(s) A4' if par > 1 else f'page(s) {choix}'}"
+                       f"{'feuille(s) A4' if par > 1 else f'page(s) {format_txt}'}"
                        f"{f', {par} par feuille' if par > 1 else ''} (1re feuille affichée).")
 
 
@@ -1048,6 +1068,12 @@ def _md(texte):
     for c in ("\\", "*", "_", "`", "[", "]", "$", "#", "<", ">", "~"):
         texte = texte.replace(c, "\\" + c)
     return texte
+
+
+def _format_entree(e):
+    """Format de l'affiche enregistrée, avec l'orientation si elle est en paysage (« A5 paysage »)."""
+    format_ = e.get("format", "")
+    return f"{format_} paysage" if format_ and e.get("orientation") == "Paysage" else format_
 
 
 def _titre_entree(e):
@@ -1094,7 +1120,7 @@ with onglet_hist:
                         detail_court = detail_court[:57].rstrip() + "…"
                     prix_aff = promos.resume_entree(e)
                     gamme = f" · {e['nb_visuels']} visuels" if e.get("nb_visuels", 0) > 1 else ""
-                    st.caption(f"{_md(detail_court)}  \n{_md(prix_aff)} · {e.get('format', '')}{gamme} · créée le "
+                    st.caption(f"{_md(detail_court)}  \n{_md(prix_aff)} · {_format_entree(e)}{gamme} · créée le "
                                f"{historique.date_creation(e)}")
                     b_ouvrir, b_page = st.columns(2)
                     b_ouvrir.button("Rouvrir", key=f"ouv_{ident}", on_click=rouvrir, args=(ident,),
