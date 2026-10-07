@@ -58,6 +58,9 @@ recherche_produit = components.declare_component(
 editeur_affiche = components.declare_component(
     "editeur_affiche", path=str(Path(__file__).parent / "composant_editeur"))
 
+collage_image = components.declare_component(
+    "collage_image", path=str(Path(__file__).parent / "composant_collage"))
+
 ss = st.session_state
 for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal", []), ("props", []),
                     ("props_msg", ""), ("code", ""), ("derniere_sel", None),
@@ -73,7 +76,10 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("filtre_hist", ""),
                     # plusieurs visuels (gamme) et « Nouvelle affiche »
                     ("extras", []), ("extra_uid", 0), ("extra_n", 0), ("ajout_extra", False), ("cand_extra", None),
-                    ("derniere_sel_extra", None), ("raz", 0), ("raz_attente", False), ("w_exemplaires", 1)):
+                    ("derniere_sel_extra", None), ("raz", 0), ("raz_attente", False), ("w_exemplaires", 1),
+                    # recherche web vérifiée, collage d'image
+                    ("props_autres", []), ("journal_web", []), ("info_nom", ""), ("derniere_collee", None),
+                    ("derniere_collee_extra", None)):
     ss.setdefault(cle, defaut)
 # autres types de promotion : type choisi, champs et cases « Faire apparaître »
 for cle, defaut in ([("w_promo_type", promos.STANDARD)]
@@ -261,6 +267,7 @@ def rouvrir(ident):
     ss.extras = [{"uid": _nouvel_uid(), "image": v, "nom": "", "code": "", "traite": True} for v in visuels[1:]]
     ss.ajout_extra, ss.cand_extra, ss.extra_n = False, None, ss.extra_n + 1
     ss.props, ss.props_msg, ss.journal = [], "", []
+    ss.props_autres, ss.journal_web, ss.info_nom = [], [], ""
     ss.reglages = reglages_defaut()
     for el, g in (e.get("reglages") or {}).items():
         if el in ss.reglages:
@@ -339,6 +346,8 @@ def nouvelle_affiche():
     # produit et visuels
     ss.code, ss.marque, ss.detail = "", "", ""
     ss.image, ss.journal, ss.props, ss.props_msg, ss.derniere_sel = None, [], [], "", None
+    ss.props_autres, ss.journal_web, ss.info_nom = [], [], ""
+    ss.derniere_collee = ss.derniere_collee_extra = None
     ss.extras, ss.ajout_extra, ss.cand_extra, ss.derniere_sel_extra = [], False, None, None
     ss.televerse_vu = None
     ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
@@ -396,12 +405,53 @@ def confirmer_suppression(ident):
 
 
 
-def chercher_web():
-    """Recherche de visuels type site marchand (fond blanc, haute résolution), classés."""
+def chercher_web(extra=()):
+    """Recherche du visuel sur le web, de la plus fiable à la moins fiable : photos de pages de sites marchands qui
+    contiennent le code (confirmées), puis pages au nom correspondant (probables), puis images non vérifiées.
+    extra : mots saisis par l'utilisateur pour affiner la recherche."""
     nom_cherche = catalogue.nom_complet(ss.marque, ss.detail)
-    requetes = [ss.code] + ([f"{nom_cherche} {ss.code}"] if nom_cherche else [])
-    with st.spinner("Recherche d'un visuel type site marchand…"):
-        ss.props, ss.props_msg = ip.propositions_web(requetes, nom=nom_cherche)
+    with st.status("Recherche du visuel sur les sites marchands…", expanded=False) as statut:
+        res = ip.rechercher_visuels(ss.code, nom=nom_cherche, requetes_extra=extra,
+                                    progression=lambda texte: statut.update(label=texte))
+        statut.update(label="Recherche terminée", state="complete")
+    ss.journal_web = res["journal"]
+    ss.info_nom = ""
+    if res["verifies"]:
+        ss.props, ss.props_autres, ss.props_msg = res["verifies"], res["autres"], ""
+    else:
+        ss.props, ss.props_autres = res["autres"], []
+        ss.props_msg = ("Aucune page de site marchand contenant ce code n'a été trouvée : les images proposées ne sont "
+                        "pas vérifiées, contrôler qu'elles montrent bien le produit." if res["autres"]
+                        else "Aucune proposition trouvée : coller une image copiée, ou importer un fichier.")
+    if res["nom"] and not ss.marque and not ss.detail:  # produit inconnu du catalogue : nom relevé sur les sites
+        ss.marque, ss.detail = catalogue.separer(res["nom"], res["marque"])
+        ss.info_nom = catalogue.nom_complet(ss.marque, ss.detail)
+
+
+def legende_proposition(p):
+    """Légende d'une proposition de visuel : fiabilité (code confirmé, probable, non vérifié), fond, site, taille."""
+    niveau = p.get("niveau", "non vérifié")
+    if niveau == "fort" or niveau == "moyen":
+        n = p.get("nb_sites", 1)
+        statut = "Code confirmé" + (f" · {n} sites" if n > 1 else "")
+    elif niveau == "nom":
+        statut = "Probable (code non retrouvé)"
+    else:
+        statut = "Non vérifié"
+    dims = f"{p['largeur']}×{p['hauteur']} px" if p.get("largeur") else "taille inconnue"
+    fond = "Fond blanc" if p.get("studio") else "Photo"
+    return f"**{statut}**  \n{fond} · {dims}  \n{p['site']}"
+
+
+def est_meilleur_choix(p, i):
+    """Première proposition confirmée sur fond blanc : le bouton « Choisir » est mis en avant."""
+    return i == 0 and bool(p.get("verifie")) and bool(p.get("studio"))
+
+
+def miniature_proposition(p, cote=300):
+    """Miniature carrée (les boutons « Choisir » restent alignés) ; adresse web telle quelle pour les images non vérifiées."""
+    m = p["miniature"]
+    return m if isinstance(m, str) else _miniature_carree(m, cote)
 
 
 def visuel_final(img, nettoyer_on, rogne, mode_nettete="Désactivée"):
@@ -441,26 +491,28 @@ def proposer_choix_extra(cand):
     """Visuels proposés pour l'image à ajouter (aucun visuel « site marchand » trouvé automatiquement)."""
     options = []
     if cand["image"] is not None:
-        options.append({"miniature": cand["image"], "image": None, "site": "Bases publiques", "legende": "Photo"})
-    for p in cand["props"]:
-        dims = f"{p['largeur']}×{p['hauteur']} px" if p["largeur"] else "taille inconnue"
-        options.append({"miniature": p["miniature"], "image": p["image"], "site": p["site"],
-                        "legende": ("Fond blanc" if p["studio"] else "Photo") + f" · {dims}"})
+        options.append({"miniature": cand["image"], "p": None, "legende": "**Bases publiques**  \nPhoto"})
+    for i, p in enumerate(cand["props"]):
+        options.append({"miniature": miniature_proposition(p), "p": p, "legende": legende_proposition(p),
+                        "meilleur": est_meilleur_choix(p, i)})
     if not options:
         st.warning(f"Aucun visuel trouvé pour {cand['nom'] or cand['code']}"
-                   + (f" ({cand['msg']})" if cand["msg"] else "") + ". Importer une image ci-dessous.")
+                   + (f" ({cand['msg']})" if cand["msg"] else "") + ". Coller ou importer une image ci-dessous.")
         return
+    if cand.get("msg"):
+        st.caption(cand["msg"])
     st.write(f"Visuels proposés pour {cand['nom'] or cand['code']}. Vérifier que l'image correspond bien au "
              "produit, puis la choisir :")
     colonnes = st.columns(4)
     for i, o in enumerate(options):
         with colonnes[i % 4]:
             st.image(o["miniature"], use_container_width=True)
-            st.caption(f"{o['site']}  \n{o['legende']}")
-            if st.button("Choisir", key=f"ex_choix_{ss.raz}_{ss.extra_n}_{i}"):
+            choisi = st.button("Choisir", key=f"ex_choix_{ss.raz}_{ss.extra_n}_{i}",
+                               type="primary" if o.get("meilleur") else "secondary")
+            st.caption(o["legende"])
+            if choisi:
                 try:
-                    img = cand["image"] if o["image"] is None else ip.rogner_marges_blanches(
-                        ip.telecharger_image(o["image"]))
+                    img = cand["image"] if o["p"] is None else ip.rogner_marges_blanches(ip.obtenir_image(o["p"]))
                     if cand["code"]:
                         ip.enregistrer_image(cand["code"], img)
                     ajouter_extra(img, cand["code"], cand["nom"])
@@ -512,12 +564,32 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
                 if img2 is not None and ip.analyser_image(img2)["studio"]:
                     ajouter_extra(img2, code2, nom2)  # visuel « site marchand » : pris directement
                     st.rerun()
-                with st.spinner("Recherche d'un visuel type site marchand…"):
-                    props2, msg2 = ip.propositions_web([code2] + ([f"{nom2} {code2}"] if nom2 != code2 else []),
-                                                       nom=nom2)
+                with st.status("Recherche d'un visuel sur les sites marchands…", expanded=False) as statut2:
+                    res2 = ip.rechercher_visuels(code2, nom=nom2 if nom2 != code2 else "",
+                                                 progression=lambda texte: statut2.update(label=texte))
+                    statut2.update(label="Recherche terminée", state="complete")
+                props2 = res2["verifies"] or res2["autres"]
+                msg2 = "" if res2["verifies"] else ("images non vérifiées : contrôler qu'elles montrent bien le produit"
+                                                    if res2["autres"] else "")
+                if nom2 == code2 and res2["nom"]:  # produit inconnu : nom relevé sur les sites marchands
+                    nom2 = catalogue.nom_complet(*catalogue.separer(res2["nom"], res2["marque"]))
                 ss.cand_extra = {"code": code2, "nom": nom2, "image": img2, "props": props2, "msg": msg2}
             if ss.cand_extra:
                 proposer_choix_extra(ss.cand_extra)
+            habillage.sous_titre("Coller une image copiée")
+            st.caption("Clic droit sur l'image (Google Images, site…) › « Copier l'image », puis cliquer dans le cadre et coller.")
+            collee2 = collage_image(key=f"collage_extra_{ss.raz}_{ss.extra_n}", default=None)
+            if collee2 and collee2.get("ts") != ss.derniere_collee_extra:
+                ss.derniere_collee_extra = collee2["ts"]
+                try:
+                    with st.spinner("Lecture de l'image…"):
+                        img3 = ip.rogner_marges_blanches(ip.image_depuis_collage(collee2))
+                except Exception as e:
+                    st.error(f"Image impossible à lire ({type(e).__name__}). Copier l'image elle-même (et non son adresse).")
+                else:
+                    cand3 = ss.cand_extra or {}
+                    ajouter_extra(img3, cand3.get("code", ""), cand3.get("nom") or "Image collée")
+                    st.rerun()
             fichier2 = st.file_uploader("ou importer une image depuis l'ordinateur (glisser-déposer)",
                                         type=["png", "jpg", "jpeg", "webp"],
                                         key=f"televerse_extra_{ss.raz}_{ss.extra_n}")
@@ -598,27 +670,58 @@ with col_form:
         code_net = ss.code
 
         # --- Visuel : recherche automatique, propositions web, import manuel
-        if ss.journal:
+        if ss.journal or ss.journal_web:
             if ss.image is None:
-                st.warning("Aucun visuel trouvé automatiquement pour ce produit : choisir une proposition "
-                           "ou importer une image ci-dessous.")
+                st.warning("Aucun visuel retenu automatiquement : choisir l'une des photos proposées ci-dessous."
+                           if ss.props else
+                           "Aucun visuel trouvé automatiquement pour ce produit : coller une image copiée "
+                           "ou importer un fichier ci-dessous.")
             with st.expander("Détail de la recherche"):
-                for ligne in ss.journal:
+                for ligne in list(ss.journal) + list(ss.journal_web):
                     st.write("• " + ligne)
 
         slot_visuel = st.container()   # visuel retenu (rempli plus bas, une fois les réglages lus)
         slot_props = st.container()    # propositions de visuels (remplies après la recherche web éventuelle)
 
-        with st.expander("Autre visuel : recherche sur le web ou import d'un fichier", expanded=ss.image is None):
+        with st.expander("Autre visuel : chercher, coller ou importer une image", expanded=ss.image is None):
             if code_net:
                 bt1, bt2 = st.columns(2)
-                if bt1.button("Chercher un visuel type site marchand"):
+                if bt1.button("Relancer la recherche sur les sites marchands", use_container_width=True):
                     chercher_web()
-                bt2.link_button("Ouvrir Google Images pour ce code",
-                                f"https://www.google.com/search?tbm=isch&q={quote(code_net)}")
+                    st.rerun()
+                bt2.link_button("Ouvrir Google Images pour ce code", use_container_width=True,
+                                url=f"https://www.google.com/search?tbm=isch&q={quote(code_net)}")
+                with st.container(key="zone_affiner"), st.form(f"affiner_{ss.raz}", border=False):
+                    c_mots, c_lancer = st.columns([3, 1], vertical_alignment="bottom")
+                    mots = c_mots.text_input("Affiner la recherche (nom, marque…)", placeholder="ex. granions masque éclat",
+                                             help="Ajoute ces mots à la recherche ; une page ne compte que si elle "
+                                                  "contient le code du produit.")
+                    affiner = c_lancer.form_submit_button("Chercher", use_container_width=True)
+                if affiner and mots.strip():
+                    chercher_web(extra=[mots])
+                    st.rerun()
             if ss.props_msg:
                 st.caption(ss.props_msg)
-            televerse = st.file_uploader("Importer un visuel manuellement (glisser-déposer)",
+            habillage.sous_titre("Coller une image copiée")
+            st.caption("Sur Google Images ou sur un site : clic droit sur l'image › « Copier l'image ». "
+                       "Revenir ici, cliquer dans le cadre, puis coller.")
+            collee = collage_image(key=f"collage_{ss.raz}", default=None)
+            if collee and collee.get("ts") != ss.derniere_collee:  # une image collée n'est prise en compte qu'une fois
+                ss.derniere_collee = collee["ts"]
+                try:
+                    with st.spinner("Lecture de l'image…"):
+                        img = ip.rogner_marges_blanches(ip.image_depuis_collage(collee))
+                except Exception as e:
+                    st.error(f"Image impossible à lire ({type(e).__name__}). Copier l'image elle-même (et non son "
+                             "adresse), ou l'importer comme fichier ci-dessous.")
+                else:
+                    ss.image = img
+                    ss.props, ss.props_autres = [], []
+                    retablir_traitement()
+                    if code_net:
+                        ip.enregistrer_image(code_net, img)
+                    st.toast("Image collée : elle est utilisée pour l'affiche.", icon=":material/check_circle:")
+            televerse = st.file_uploader("Ou importer un fichier image (glisser-déposer)",
                                          type=["png", "jpg", "jpeg", "webp"], key=f"televerse_{ss.raz}")
             if televerse is not None:
                 memoriser = st.checkbox("Mémoriser ce visuel pour ce code", value=True)
@@ -633,28 +736,40 @@ with col_form:
 
         with slot_props:
             if ss.props:
-                st.write("Visuels proposés, classés du plus proche d'un visuel de site marchand au moins proche. "
-                         "Vérifier que l'image correspond bien au produit, puis la choisir "
-                         "(elle sera nettoyée automatiquement) :")
+                if any(p.get("verifie") for p in ss.props):
+                    intro = ("Photos trouvées sur des sites marchands dont la page contient bien ce code, la plus "
+                             "utilisée d'abord. Vérifier l'image, puis la choisir (elle sera nettoyée automatiquement) :")
+                elif any(p.get("niveau") == "nom" for p in ss.props):
+                    intro = ("Aucune page ne contient ce code : ces photos viennent de pages dont le nom correspond. "
+                             "À vérifier avec soin, puis choisir :")
+                else:
+                    intro = ("Images du web non vérifiées (rien ne prouve qu'elles montrent ce produit). "
+                             "Vérifier l'image, puis la choisir :")
+                st.write(intro)
+                if ss.info_nom:
+                    st.caption(f"Nom relevé sur les sites marchands et repris dans les textes : « {ss.info_nom} » "
+                               "(à vérifier).")
                 cols = st.columns(4)
                 for i, p in enumerate(ss.props):
                     with cols[i % 4]:
-                        st.image(p["miniature"], use_container_width=True)
-                        dims = f"{p['largeur']}×{p['hauteur']} px" if p["largeur"] else "taille inconnue"
-                        etiquette = ("Fond blanc" if p["studio"] else "Photo") + (
-                            " · meilleur choix" if i == 0 and p["studio"] else "")
-                        st.caption(f"**{etiquette}**  \n{p['site']}  \n{dims}")
-                        if st.button("Choisir", key=f"choix{i}"):
+                        st.image(miniature_proposition(p), use_container_width=True)
+                        choisi = st.button("Choisir", key=f"choix{i}",
+                                           type="primary" if est_meilleur_choix(p, i) else "secondary")
+                        st.caption(legende_proposition(p))
+                        if choisi:
                             try:
-                                img = ip.rogner_marges_blanches(ip.telecharger_image(p["image"]))
+                                img = ip.rogner_marges_blanches(ip.obtenir_image(p))
                                 ss.image = img
                                 retablir_traitement()
                                 if code_net:
                                     ip.enregistrer_image(code_net, img)
-                                ss.props = []
+                                ss.props, ss.props_autres = [], []
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Téléchargement impossible ({type(e).__name__}).")
+                if ss.props_autres and st.button("Voir aussi des images non vérifiées", key="voir_autres"):
+                    ss.props, ss.props_autres = list(ss.props) + list(ss.props_autres), []
+                    st.rerun()
 
         # --- Réglages du visuel (repliés : la plupart du temps, les valeurs par défaut suffisent)
         with st.expander("Réglages du visuel : fond, recadrage, netteté"):
@@ -685,7 +800,7 @@ with col_form:
                                "l'impression. Essayer la netteté « Rapide » dans les réglages du visuel, ou choisir "
                                "une image plus grande.")
                 elif not qualite["studio"]:
-                    st.caption("Visuel de type photo : essayer « Chercher un visuel type site marchand ».")
+                    st.caption("Visuel de type photo : essayer une autre proposition, ou coller une image sur fond blanc.")
         else:
             visuel = None
         autres_visuels = zone_autres_images(cat, nettoyer_on, mode_nettete) if ss.image is not None else []

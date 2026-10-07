@@ -65,6 +65,8 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 [data-testid="stFileUploaderDropzone"]{border-radius:10px}
 [data-testid="stCaptionContainer"]{color:var(--muet)}
 [data-testid="stForm"]{max-width:440px;background:#fff;border:1px solid var(--bord-doux);border-radius:var(--rayon);padding:1.2rem 1.3rem}
+/* champ « Affiner la recherche » : formulaire sans cadre, sur toute la largeur */
+.st-key-zone_affiner [data-testid="stForm"]{max-width:none;background:transparent;border:none;padding:0}
 
 @media (max-width:699px){
   .st-key-apercu_fixe{max-height:none;overflow-y:visible}
