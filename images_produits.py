@@ -11,6 +11,7 @@ Ordre de recherche :
 Toute image retenue est mémorisée dans images/<code>.png.
 """
 import base64
+import importlib
 import io
 import ipaddress
 import json
@@ -47,7 +48,7 @@ NAVIGATEUR = {
 EXTENSIONS = ("png", "jpg", "jpeg", "webp")
 MAX_IMAGE_OCTETS = 8_000_000      # une image plus lourde est refusée
 MAX_PAGE_OCTETS = 2_500_000       # une page plus lourde est lue jusqu'à cette taille seulement
-MAX_PAGES = 16                    # pages ouvertes par étape de la recherche vérifiée
+MAX_PAGES = 18                    # pages ouvertes par étape de la recherche vérifiée
 DELAI_ETAPE = 22                  # secondes accordées à l'ouverture des pages d'une étape
 MIN_COTE_VERIFIE = 150            # une image de page plus petite (en pixels) n'est pas retenue
 DOMAINES_IGNORES = ("google.", "facebook.", "instagram.", "pinterest.", "youtube.", "youtu.be", "tiktok.",
@@ -274,28 +275,67 @@ def _site(url: str) -> str:
     return h[4:] if h.startswith("www.") else h
 
 
+# --------------------------------------------------------------------------- Moteurs de recherche
+def _ddgs(methode, requete, **options):
+    """Une recherche (« text » ou « images ») par les moteurs du module ddgs ; un 2e essai en cas d'échec."""
+    from ddgs import DDGS
+    erreur = None
+    for essai in range(2):
+        try:
+            return getattr(DDGS(), methode)(requete, **options) or []
+        except Exception as e:
+            erreur = e
+            time.sleep(0.6 + essai)
+    raise erreur
+
+
+def _recherches(methode, requetes, **options):
+    """Plusieurs recherches, 3 à la fois. Retourne (liste de résultats par requête, erreurs lisibles)."""
+    try:
+        importlib.import_module("ddgs")
+    except Exception:
+        return [], ["module de recherche web non installé (ddgs)"]
+    erreurs = []
+
+    def une(req):
+        try:
+            return _ddgs(methode, req, **options)
+        except Exception as e:
+            erreurs.append(f"« {req[:40]} » : {type(e).__name__}")
+            return []
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        lots = list(ex.map(une, list(dict.fromkeys(r for r in requetes if r.strip()))))
+    return lots, erreurs
+
+
+def images_web(requetes):
+    """Résultats bruts d'une recherche d'images (sans doublon). Retourne (résultats, erreurs)."""
+    lots, erreurs = _recherches("images", requetes, region="fr-fr", max_results=25)
+    vus, bruts = set(), []
+    for lot in lots:
+        for r in lot:
+            u = r.get("image")
+            if u and u not in vus:
+                vus.add(u)
+                bruts.append(r)
+    return bruts, erreurs
+
+
 # --------------------------------------------------------------------------- Images du web (non vérifiées)
-def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int = 350):
+def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int = 350, bruts=None):
     """Propositions d'images issues d'une recherche d'images web, classées par ressemblance à un visuel
     de site marchand : fond blanc uni, haute résolution, titre proche du nom du produit.
     Ces images ne sont PAS vérifiées (rien ne prouve qu'elles montrent le bon produit).
+    bruts : résultats d'une recherche d'images déjà faite (sinon la recherche est lancée avec requetes).
     Retourne (liste de dicts, message). À valider visuellement par l'utilisateur."""
-    if isinstance(requetes, str):
-        requetes = [requetes]
-    try:
-        from ddgs import DDGS
-    except Exception:
-        return [], "Module de recherche web non installé (ddgs)."
-    bruts, erreur = [], ""
-    for req in requetes:
-        try:
-            try:
-                res = DDGS().images(req, max_results=20, size="Large")
-            except TypeError:
-                res = DDGS().images(req, max_results=20)
-            bruts.extend(res or [])
-        except Exception as e:
-            erreur = f"Recherche web indisponible ({type(e).__name__})."
+    erreur = ""
+    if bruts is None:
+        if isinstance(requetes, str):
+            requetes = [requetes]
+        bruts, erreurs = images_web(requetes)
+        if erreurs and not bruts:
+            erreur = f"Recherche web indisponible ({erreurs[0]})."
     vus, candidats = set(), []
     for r in bruts:
         url = r.get("image")
@@ -567,41 +607,52 @@ def _verifier_pages(urls, code, nom="", delai=DELAI_ETAPE):
     return pages, bilan
 
 
+def _cle_url(u: str):
+    p = urlparse(u)
+    return (p.netloc.lower(), p.path.rstrip("/"))
+
+
+def _url_examinable(u: str) -> bool:
+    """Page web ordinaire, hors réseaux sociaux, moteurs de recherche et fichiers."""
+    p = urlparse(u or "")
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return False
+    if any(d in p.netloc.lower() for d in DOMAINES_IGNORES):
+        return False
+    return not re.search(r"\.(pdf|jpe?g|png|webp|gif)$", p.path, re.I)
+
+
 def _urls_de_recherche(requetes, code):
-    """Adresses de pages trouvées par des moteurs de recherche (texte) pour chaque requête.
-    Retourne (liste d'adresses sans doublon, liste d'erreurs lisibles)."""
-    try:
-        from ddgs import DDGS
-    except Exception:
-        return [], ["module de recherche web non installé (ddgs)"]
-    erreurs = []
-
-    def chercher(req):
-        try:
-            return DDGS().text(req, region="fr-fr", max_results=15) or []
-        except Exception as e:
-            erreurs.append(f"« {req[:40]} » : {type(e).__name__}")
-            return []
-
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(requetes)))) as ex:
-        lots = list(ex.map(chercher, requetes))
+    """Pages trouvées par les moteurs de recherche (texte), sans doublon.
+    Retourne (adresses dont le résultat cite déjà le code, autres adresses, erreurs lisibles)."""
+    lots, erreurs = _recherches("text", requetes, region="fr-fr", max_results=15)
     motif = _motif_code(code)
-    vus, urls = set(), []
+    vus, avec, sans = set(), [], []
     for lot in lots:
         for r in lot:
             u = (r.get("href") or "").strip()
-            p = urlparse(u)
-            if p.scheme not in ("http", "https") or not p.netloc:
+            if not _url_examinable(u) or _cle_url(u) in vus:
                 continue
-            if any(d in p.netloc.lower() for d in DOMAINES_IGNORES) or re.search(r"\.(pdf|jpe?g|png|webp)$", p.path, re.I):
-                continue
-            cle = (p.netloc.lower(), p.path.rstrip("/"))
-            if cle in vus:
-                continue
-            vus.add(cle)
-            urls.append(u)
-    urls.sort(key=lambda u: 0 if motif.search(unquote(u)) else 1)  # les adresses qui contiennent le code d'abord
-    return urls, erreurs
+            vus.add(_cle_url(u))
+            texte = " ".join([unquote(u), r.get("title") or "", r.get("body") or ""])
+            (avec if motif.search(texte) else sans).append(u)
+    return avec, sans, erreurs
+
+
+def _pages_des_images(bruts, code, mots_nom=()):
+    """Pages d'origine des résultats d'images ; celles dont le titre cite le code, puis le nom, en premier."""
+    motif = _motif_code(code)
+    vus, notees = set(), []
+    for r in bruts:
+        u = (r.get("url") or "").strip()
+        if not _url_examinable(u) or _cle_url(u) in vus:
+            continue
+        vus.add(_cle_url(u))
+        titre = " ".join([unquote(u), r.get("title") or ""])
+        mots_titre = _mots_utiles(titre)
+        note = 2 if motif.search(titre) else (1 if mots_nom and any(m in mots_titre for m in mots_nom) else 0)
+        notees.append((note, len(notees), u))
+    return [u for _, _, u in sorted(notees, key=lambda x: (-x[0], x[1]))]
 
 
 def _empreinte(img: Image.Image):
@@ -639,12 +690,14 @@ def _evaluer_image(url, page):
             "_h": _empreinte(rogner_marges_blanches(rgb))}
 
 
-def _candidats_de_pages(pages, maxi=24):
+def _candidats_de_pages(pages, maxi=30):
     """Images des pages confirmées : téléchargées, dédoublonnées (même photo sur plusieurs sites), classées."""
-    demandes = []
-    for p in pages:
+    demandes, vus = [], set()
+    for p in sorted(pages, key=lambda p: -RANG_NIVEAU[p["niveau"]]):
         for u in p["images"][:4]:
-            demandes.append((u, p))
+            if (u, p["url"]) not in vus:
+                vus.add((u, p["url"]))
+                demandes.append((u, p))
     demandes = demandes[:maxi]
     if not demandes:
         return []
@@ -685,6 +738,14 @@ def _candidats_de_pages(pages, maxi=24):
     return uniques
 
 
+def _marque_devinee(nom: str) -> str:
+    """Marque en tête d'un nom de la forme « Marque - produit - détail » (1 à 3 mots, sans chiffre)."""
+    m = re.match(r"^\s*([^-–—|:]{2,30}?)\s+[-–—|:]\s+\S", nom or "")
+    if m and 1 <= len(m.group(1).split()) <= 3 and not re.search(r"\d", m.group(1)):
+        return m.group(1).strip()
+    return ""
+
+
 def _nom_consensus(pages):
     """Nom et marque du produit les plus cohérents entre les pages (le nom le plus proche des autres)."""
     noms = [p["nom"] for p in pages if p.get("nom") and p["niveau"] != "nom"]
@@ -696,9 +757,26 @@ def _nom_consensus(pages):
         return sum(len(ensembles[i] & ensembles[k]) / max(1, len(ensembles[i] | ensembles[k]))
                    for k in range(len(noms)) if k != i)
 
-    meilleur = max(range(len(noms)), key=lambda i: (proximite(i), -len(noms[i])))
+    meilleur = noms[max(range(len(noms)), key=lambda i: (proximite(i), -len(noms[i])))]
     marques = Counter(p["marque"] for p in pages if p.get("marque") and p["niveau"] != "nom")
-    return noms[meilleur], (marques.most_common(1)[0][0] if marques else "")
+    marque = marques.most_common(1)[0][0] if marques else _marque_devinee(meilleur)
+    return meilleur, marque
+
+
+MOTS_VIDES = {"de", "du", "des", "en", "et", "la", "le", "les", "au", "aux", "pour", "avec", "unite", "unité",
+              "unités", "unites", "boite", "boîte", "x1"}
+
+
+def _nom_pour_requete(nom: str, marque: str = "") -> str:
+    """Nom raccourci pour une recherche : 6 mots significatifs, sans quantités ni séparateurs."""
+    texte = re.sub(r"\b\d+(?:[.,]\d+)?\s?(?:ml|cl|l|mg|g|gr|kg|x)\b", " ", nom or "", flags=re.I)  # quantités
+    mots = [m.strip(",;:()") for m in re.split(r"\s+[-–—|/]\s+|\s+", texte)]
+    mots = [m for i, m in enumerate(mots)
+            if m and not re.fullmatch(r"[\d.,]+", m) and (i == 0 or m.lower() not in MOTS_VIDES)]
+    texte = " ".join(mots[:6])
+    if marque and marque.lower() not in texte.lower():
+        texte = f"{marque} {texte}"
+    return texte
 
 
 def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int = 12, progression=None):
@@ -708,22 +786,26 @@ def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int 
         return _rechercher_visuels(code, nom, requetes_extra, nombre, progression)
     except Exception as e:
         code = nettoyer_code(code)
-        autres, msg = propositions_web([code] + ([f"{nom} {code}"] if nom else []), nom=nom, nombre=nombre)
+        try:
+            autres, msg = propositions_web([code] + ([f"{nom} {code}"] if nom else []), nom=nom, nombre=nombre)
+        except Exception:
+            autres, msg = [], ""
         return {"verifies": [], "autres": autres, "nom": "", "marque": "",
                 "journal": [f"Recherche vérifiée interrompue ({type(e).__name__}) : images web non vérifiées."]
                 + ([msg] if msg else [])}
 
 
+BUDGET_RECHERCHE = 45  # secondes : passé ce délai, la recherche élargie par le nom n'est pas lancée
+
+
 def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=None):
-    """Recherche web du visuel d'un produit, en cascade, de la plus fiable à la moins fiable :
-      1. pages de sites marchands qui contiennent le code (« confirmé »), requêtes variées ;
-      2. si besoin, pages issues d'une recherche d'images dont le code figure dans la page ;
-      3. si aucune page ne contient le code et que le nom du produit est connu : pages dont le nom
-         correspond (« probable », code non retrouvé) ;
-      4. à défaut, images web non vérifiées.
-    requetes_extra : mots saisis par l'utilisateur pour affiner (nom, marque…).
-    Retourne {'verifies': [...], 'autres': [...], 'nom': str, 'marque': str, 'journal': [...]}.
-    Chaque proposition : miniature, image, octets, site, page, largeur, hauteur, studio, verifie, niveau, nb_sites, score."""
+    """Cascade :
+      1. moteurs de recherche (pages et images) interrogés avec le code, sous plusieurs formulations ;
+         chaque page trouvée (y compris la page d'origine de chaque image) est ouverte et ne compte que si
+         le code y figure ;
+      2. si moins de 4 pages confirmées : recherche élargie par le nom (connu, saisi, ou relevé sur une
+         page confirmée), les pages trouvées étant toujours vérifiées par le code ;
+      3. à défaut de code retrouvé : pages au nom correspondant (« probables »), puis images non vérifiées."""
     debut = time.time()
     code = nettoyer_code(code)
     sortie = {"verifies": [], "autres": [], "nom": "", "marque": "", "journal": []}
@@ -740,22 +822,10 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
         j.append(f"Code invalide ({len(code)} chiffres) : recherche web impossible.")
         return sortie
     extras = [x.strip() for x in requetes_extra if x and x.strip()]
-    nom_ref = nom.strip() or (extras[0] if extras else "")
-
-    # --- 1. pages qui citent le code
-    etape("Recherche des pages qui citent le code…")
-    requetes = [code, f"code EAN {code}", f'"{code}"']
-    if nom.strip():
-        requetes.append(f"{nom.strip()} {code}")
-    for x in extras:
-        requetes += [f"{x} {code}", x]
-    urls, erreurs = _urls_de_recherche(requetes, code)
-    j.append(f"Recherche web par le code ({len(requetes)} formulations) : {len(urls)} pages trouvées"
-             + (f" · incidents : {' ; '.join(erreurs[:3])}" if erreurs else "") + ".")
-    deja = set(urls[:MAX_PAGES])
-    etape(f"Vérification de {len(deja)} pages…")
-    pages, bilan = _verifier_pages(urls[:MAX_PAGES], code, nom_ref)
-    pages_vues = len(deja)
+    nom = (nom or "").strip()
+    nom_ref = nom or (extras[0] if extras else "")
+    deja, pages, tous_bruts = set(), [], []
+    compte = {"pages": 0}
 
     def resume(pages_, bilan_, titre):
         avec_code_ = [p for p in pages_ if p["niveau"] != "nom"]
@@ -773,57 +843,72 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
         if bilan_["sans_code"] or bilan_["lentes"]:
             j.append(f"Pages écartées : {bilan_['sans_code']} sans le code, {bilan_['lentes']} trop lentes.")
 
-    resume(pages, bilan, "Étape 1")
+    def chercher(req_texte, req_images, titre):
+        etape(f"{titre} : interrogation des moteurs de recherche…")
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_texte = ex.submit(_urls_de_recherche, req_texte, code)
+            f_images = ex.submit(images_web, req_images)
+            avec, sans, err_t = f_texte.result()
+            bruts, err_i = f_images.result()
+        tous_bruts.extend(bruts)
+        erreurs = err_t + err_i
+        j.append(f"{titre} : {len(set(req_texte)) + len(set(req_images))} recherches · {len(avec)} pages citant le "
+                 f"code, {len(sans)} autres pages, {len(bruts)} images"
+                 + (f" · incidents : {' ; '.join(erreurs[:3])}" if erreurs else "") + ".")
+        return avec, sans, bruts
+
+    def examiner(urls, titre, nom_verif):
+        nouvelles = []
+        for u in urls:
+            if _cle_url(u) not in deja and len(nouvelles) < MAX_PAGES:
+                deja.add(_cle_url(u))
+                nouvelles.append(u)
+        if not nouvelles:
+            j.append(f"{titre} : aucune nouvelle page à examiner.")
+            return []
+        etape(f"{titre} : vérification de {len(nouvelles)} pages…")
+        trouvees, bilan = _verifier_pages(nouvelles, code, nom_verif)
+        compte["pages"] += len(nouvelles)
+        resume(trouvees, bilan, titre)
+        return trouvees
+
+    # --- 1. le code
+    req_texte = [code, f'"{code}"', f"code EAN {code}"]
+    req_images = [code, f"{code} pharmacie"]
+    if nom:
+        req_texte.append(f"{_nom_pour_requete(nom)} {code}")
+        req_images.append(f"{_nom_pour_requete(nom)} {code}")
+    for x in extras:
+        req_texte.append(f"{x} {code}")
+        req_images += [f"{x} {code}", x]
+    avec, sans, bruts = chercher(req_texte, req_images, "Étape 1 (code)")
+    pages += examiner(avec + _pages_des_images(bruts, code, _mots_utiles(nom_ref)) + sans[:6],
+                      "Étape 1 (code)", nom_ref)
+
+    # --- 2. recherche élargie par le nom, pages toujours vérifiées par le code
+    nom_trouve, marque_trouvee = _nom_consensus(pages)
+    nom_rebond = nom_ref or nom_trouve
+    if len([p for p in pages if p["niveau"] != "nom"]) < 4 and len(_mots_utiles(nom_rebond)) >= 2:
+        if time.time() - debut > BUDGET_RECHERCHE:
+            j.append("Étape 2 non lancée (recherche déjà longue) : « Affiner la recherche » permet de la relancer.")
+        else:
+            court = _nom_pour_requete(nom_rebond, marque_trouvee)
+            avec2, sans2, bruts2 = chercher([court, f"{court} pharmacie"], [court, f"{court} parapharmacie"],
+                                            f"Étape 2 (nom « {court[:45]} »)")
+            pages += examiner(avec2 + _pages_des_images(bruts2, code, _mots_utiles(court)) + sans2,
+                              "Étape 2 (nom)", nom_rebond)
+
+    # --- 3. photos, nom, et à défaut images non vérifiées
     etape("Téléchargement des photos…")
     candidats = _candidats_de_pages(pages)
-
-    # --- 2. images du web : leurs pages sources sont vérifiées à leur tour
-    autres = []
-    if len([c for c in candidats if c["niveau"] != "nom"]) < 2:
-        etape("Recherche d'images complémentaires…")
-        autres, msg = propositions_web([code] + ([f"{nom.strip()} {code}"] if nom.strip() else []),
-                                       nom=nom_ref, nombre=16)
-        sources = []
-        for c in autres:
-            u = c.get("page")
-            if u and u not in deja and _url_publique(u) and not any(d in _site(u) for d in DOMAINES_IGNORES):
-                sources.append(u)
-                deja.add(u)
-        sources = list(dict.fromkeys(sources))[:MAX_PAGES]
-        if sources:
-            etape(f"Vérification de {len(sources)} pages d'images…")
-            pages2, bilan2 = _verifier_pages(sources, code, nom_ref)
-            pages_vues += len(sources)
-            resume(pages2, bilan2, "Étape 2 (pages des images trouvées)")
-            pages += pages2
-            candidats = _candidats_de_pages(pages)
-        elif msg:
-            j.append(f"Étape 2 : {msg}")
-
-    # --- 3. aucune page avec le code : pages dont le nom correspond
-    if not [c for c in candidats if c["niveau"] != "nom"] and len(_mots_utiles(nom_ref)) >= 2:
-        etape("Recherche par le nom du produit…")
-        requetes_nom = [nom_ref, f"{nom_ref} pharmacie", f"{nom_ref} acheter"]
-        urls3, erreurs3 = _urls_de_recherche(requetes_nom, code)
-        urls3 = [u for u in urls3 if u not in deja][:MAX_PAGES]
-        j.append(f"Étape 3 : recherche par le nom « {nom_ref[:50]} » : {len(urls3)} pages à examiner"
-                 + (f" · incidents : {' ; '.join(erreurs3[:2])}" if erreurs3 else "") + ".")
-        if urls3:
-            etape(f"Vérification de {len(urls3)} pages par le nom…")
-            pages3, bilan3 = _verifier_pages(urls3, code, nom_ref)
-            pages_vues += len(urls3)
-            avec_code = len([p for p in pages3 if p["niveau"] != "nom"])
-            j.append(f"Étape 3 : {len(pages3) - avec_code} pages au nom correspondant (code non retrouvé : à vérifier)"
-                     + (f", {avec_code} pages avec le code" if avec_code else "") + ".")
-            pages += pages3
-            candidats = _candidats_de_pages(pages)
-
     confirmes = [c for c in candidats if c["niveau"] != "nom"]
     probables = [c for c in candidats if c["niveau"] == "nom"]
-    sortie["verifies"] = (confirmes or probables)[:nombre]   # les « probables » ne servent qu'à défaut de photo confirmée
+    sortie["verifies"] = (confirmes or probables)[:nombre]  # les « probables » ne servent qu'à défaut
     sortie["nom"], sortie["marque"] = _nom_consensus(pages)
-    sortie["autres"] = [c for c in autres[:nombre]]
-    j.append(f"Résultat : {len(confirmes)} photo(s) confirmée(s) par le code, "
-             f"{len(probables)} probable(s)" + (" (non retenues, des photos confirmées existent)" if confirmes and probables else "")
-             + f", {pages_vues} pages examinées, {time.time() - debut:.0f} s.")
+    if not confirmes and tous_bruts:
+        etape("Préparation des images non vérifiées…")
+        sortie["autres"], _ = propositions_web([], nom=nom_ref or nom_trouve, nombre=nombre, bruts=tous_bruts)
+    j.append(f"Résultat : {len(confirmes)} photo(s) confirmée(s) par le code, {len(probables)} probable(s)"
+             + (" (non retenues, des photos confirmées existent)" if confirmes and probables else "")
+             + f", {compte['pages']} pages examinées, {time.time() - debut:.0f} s.")
     return sortie
