@@ -1,14 +1,16 @@
 """Recherche du visuel et du nom d'un produit à partir de son code CIP13 / EAN13.
 
 Ordre de recherche :
-  1. dossier local  images/<code>.(png|jpg|jpeg|webp)   (cache et dépôts manuels)
-  2. Open Beauty Facts, Open Food Facts, Open Products Facts (bases collaboratives)
-  3. Recherche web VÉRIFIÉE (rechercher_visuels) : des moteurs de recherche trouvent des pages qui citent le code ;
+  1. dossier local  images/<code>.(png|jpg|jpeg|webp)   (images déposées à la main ; l'outil n'y écrit rien)
+  2. visuel d'une affiche déjà enregistrée pour ce code (historique)
+  3. Open Beauty Facts, Open Food Facts, Open Products Facts (bases collaboratives)
+  4. Recherche web VÉRIFIÉE (rechercher_visuels) : des moteurs de recherche trouvent des pages qui citent le code ;
      chaque page est ouverte et ne compte que si le code y figure réellement. Aucune liste de sites n'est figée :
      un site qui change d'adresse est retrouvé par le moteur, une page qui ne répond plus est ignorée.
      À défaut : pages dont le nom du produit correspond (« probable »), puis images web non vérifiées.
-  4. Import ou collage manuel d'une image (collage depuis le presse-papiers, glisser-déposer, fichier).
-Toute image retenue est mémorisée dans images/<code>.png.
+  5. Import ou collage manuel d'une image (collage depuis le presse-papiers, glisser-déposer, fichier).
+Stockage : aucune image trouvée, choisie ou collée n'est conservée sur le disque. Seuls les visuels des affiches
+enregistrées le sont, dans l'historique (voir historique.py) ; supprimer l'affiche supprime ses visuels.
 """
 import base64
 import importlib
@@ -21,7 +23,6 @@ import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from html.parser import HTMLParser
-from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
@@ -29,8 +30,7 @@ from PIL import Image, ImageOps
 
 from chemins import DONNEES
 
-DOSSIER_IMAGES = DONNEES / "images"
-DOSSIER_IMAGES.mkdir(parents=True, exist_ok=True)
+DOSSIER_IMAGES = DONNEES / "images"  # lu seulement (images déposées à la main)
 
 SOURCES = [
     ("Open Beauty Facts", "https://world.openbeautyfacts.org/api/v2/product/{code}.json"),
@@ -50,7 +50,7 @@ MAX_IMAGE_OCTETS = 8_000_000      # une image plus lourde est refusée
 MAX_PAGE_OCTETS = 2_500_000       # une page plus lourde est lue jusqu'à cette taille seulement
 MAX_PAGES = 18                    # pages ouvertes par étape de la recherche vérifiée
 DELAI_ETAPE = 22                  # secondes accordées à l'ouverture des pages d'une étape
-MIN_COTE_VERIFIE = 150            # une image de page plus petite (en pixels) n'est pas retenue
+MIN_COTE_VERIFIE = 300            # produit plus petit (grand côté, en pixels, marges retirées) : non proposé
 DOMAINES_IGNORES = ("google.", "facebook.", "instagram.", "pinterest.", "youtube.", "youtu.be", "tiktok.",
                     "twitter.", "x.com", "linkedin.", "reddit.", "amazon.", "ebay.", "aliexpress.", "leboncoin.",
                     "wikipedia.", "duckduckgo.", "bing.com")
@@ -93,10 +93,20 @@ def image_locale(code: str):
     return None
 
 
-def enregistrer_image(code: str, img: Image.Image) -> Path:
-    p = DOSSIER_IMAGES / f"{code}.png"
-    vers_rgb_blanc(img).save(p)
-    return p
+def visuel_historique(code: str):
+    """Visuel principal de l'affiche enregistrée la plus récente pour ce code (déjà traité : nettoyé, net).
+    Retourne (image ou None, date de l'affiche JJ/MM/AAAA). L'image porte img.info["origine"] = "historique"."""
+    try:
+        import historique
+        for e in historique.lister():  # les plus récentes d'abord
+            if nettoyer_code(e.get("code") or "") == code and e.get("a_visuel"):
+                img = historique.visuel(e["id"])
+                if img is not None:
+                    img.info["origine"] = "historique"
+                    return img, historique.date_creation(e)
+    except Exception:
+        pass
+    return None, ""
 
 
 # --------------------------------------------------------------------------- Téléchargements
@@ -191,7 +201,11 @@ def rechercher(code: str):
 
     img = image_locale(code)
     if img is not None:
-        journal.append("Visuel déjà présent dans le dossier images.")
+        journal.append("Visuel déposé dans le dossier images.")
+    else:
+        img, date_affiche = visuel_historique(code)
+        if img is not None:
+            journal.append(f"Visuel repris de l'affiche enregistrée le {date_affiche} (historique).")
     marque, detail = "", ""
     for source, modele in SOURCES:
         try:
@@ -232,7 +246,6 @@ def rechercher(code: str):
             continue
         try:
             img = rogner_marges_blanches(telecharger_image(url))
-            enregistrer_image(code, img)
             journal.append(f"{source} : visuel obtenu.")
         except Exception as e:
             journal.append(f"{source} : téléchargement du visuel impossible ({type(e).__name__}).")
@@ -669,8 +682,10 @@ def _meme_image(a, b, seuil: float = 14.0) -> bool:
     return sum(abs(x - y) for x, y in zip(a, b)) / len(a) <= seuil
 
 
-def _evaluer_image(url, page):
-    """Télécharge une image de page produit. Retourne un dict de candidat, ou None si elle ne convient pas."""
+def _evaluer_image(url, page, rang=0):
+    """Télécharge une image de page produit. Retourne un dict de candidat, ou None si elle ne convient pas.
+    rang : place de l'image dans la page (0 = photo principale du produit).
+    Les dimensions retenues sont celles du produit lui-même, marges blanches retirées (comme à l'impression)."""
     try:
         octets = telecharger_octets(url, referer=page["url"], delai=(4, 12))
         img = Image.open(io.BytesIO(octets))
@@ -678,31 +693,34 @@ def _evaluer_image(url, page):
     except Exception:
         return None
     rgb = vers_rgb_blanc(img)
-    if min(rgb.size) < MIN_COTE_VERIFIE or max(rgb.size) > 3 * min(rgb.size):
-        return None  # trop petite, ou bandeau
+    if max(rgb.size) > 3 * min(rgb.size):
+        return None  # bandeau
+    produit = rogner_marges_blanches(rgb)  # un petit flacon au milieu d'un grand fond blanc reste petit
+    if min(produit.size) < 40:
+        return None  # image vide ou presque
     a = analyser_image(rgb)
     mini = rgb.copy()
     mini.thumbnail((320, 320))
     return {"miniature": mini, "image": url, "octets": octets if len(octets) <= 1_500_000 else None,
             "titre": page.get("nom", ""), "site": page["site"], "page": page["url"],
-            "largeur": rgb.width, "hauteur": rgb.height, "blanc": a["blanc"], "studio": a["studio"],
+            "largeur": produit.width, "hauteur": produit.height, "blanc": a["blanc"], "studio": a["studio"],
             "verifie": page["niveau"] != "nom", "niveau": page["niveau"], "sites": {page["site"]},
-            "_h": _empreinte(rogner_marges_blanches(rgb))}
+            "principale": rang == 0, "_h": _empreinte(produit)}
 
 
 def _candidats_de_pages(pages, maxi=30):
     """Images des pages confirmées : téléchargées, dédoublonnées (même photo sur plusieurs sites), classées."""
     demandes, vus = [], set()
     for p in sorted(pages, key=lambda p: -RANG_NIVEAU[p["niveau"]]):
-        for u in p["images"][:4]:
+        for rang, u in enumerate(p["images"][:4]):
             if (u, p["url"]) not in vus:
                 vus.add((u, p["url"]))
-                demandes.append((u, p))
+                demandes.append((u, p, rang))
     demandes = demandes[:maxi]
     if not demandes:
         return []
     ex = ThreadPoolExecutor(max_workers=8)
-    futures = [ex.submit(_evaluer_image, u, p) for u, p in demandes]
+    futures = [ex.submit(_evaluer_image, u, p, rang) for u, p, rang in demandes]
     faits, _ = wait(futures, timeout=DELAI_ETAPE)
     ex.shutdown(wait=False, cancel_futures=True)
     candidats = []
@@ -714,24 +732,29 @@ def _candidats_de_pages(pages, maxi=30):
                 c = None
             if c:
                 candidats.append(c)
-    candidats.sort(key=lambda c: -min(c["largeur"], c["hauteur"]))
+    # même photo sur plusieurs sites : on garde la version où le produit est le plus grand (fond blanc d'abord) ;
+    # les versions trop petites comptent quand même comme sites où la photo figure
+    candidats.sort(key=lambda c: (-max(c["largeur"], c["hauteur"]) - 400 * c["studio"]))
     uniques = []
     for c in candidats:
         for u in uniques:
             if _meme_image(u["_h"], c["_h"]):
                 u["sites"] |= c["sites"]
+                u["principale"] = u["principale"] or c["principale"]
                 if RANG_NIVEAU[c["niveau"]] > RANG_NIVEAU[u["niveau"]]:
                     u["niveau"] = c["niveau"]
                 break
         else:
             uniques.append(c)
+    uniques = [c for c in uniques if max(c["largeur"], c["hauteur"]) >= MIN_COTE_VERIFIE]
     for c in uniques:
         c["verifie"] = c["niveau"] != "nom"
         c["nb_sites"] = len(c["sites"])
         c["sites"] = sorted(c["sites"])
-        resolution = min(1.0, min(c["largeur"], c["hauteur"]) / 800)
+        resolution = min(1.0, max(c["largeur"], c["hauteur"]) / 1000)  # grand côté : un flacon fin reste net
         confiance = {"fort": 25, "moyen": 15, "nom": 0}.get(c["niveau"], 0)
         c["score"] = (100 * c["blanc"] + 40 * resolution + confiance + 25 * min(1.0, (c["nb_sites"] - 1) / 2)
+                      + (20 if c["principale"] else 0)  # photo principale d'une page, plutôt qu'une photo de galerie
                       - (60 if c["niveau"] == "nom" else 0))
         del c["_h"]
     uniques.sort(key=lambda c: -c["score"])

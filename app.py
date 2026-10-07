@@ -36,7 +36,9 @@ acces.verifier_acces()  # version en ligne : mot de passe commun (sans effet si 
 @st.cache_resource
 def _demarrage():
     sauvegarde.restaurer()  # version en ligne : récupère le catalogue, le style et l'historique sauvegardés
-    historique.purger()  # supprime les affiches de plus de 3 mois
+    historique.purger()  # supprime les affiches de plus de 3 mois (et leurs visuels)
+    nettoyage.vider_ancien_cache()  # anciennes versions : images nettoyées gardées sur le disque, inutiles
+    nettete.vider_ancien_cache()
     return True
 
 
@@ -79,7 +81,9 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("derniere_sel_extra", None), ("raz", 0), ("raz_attente", False), ("w_exemplaires", 1),
                     # recherche web vérifiée, collage d'image
                     ("props_autres", []), ("journal_web", []), ("info_nom", ""), ("derniere_collee", None),
-                    ("derniere_collee_extra", None)):
+                    ("derniere_collee_extra", None),
+                    # propositions gardées après un choix (« Changer de photo »)
+                    ("props_choisie", None), ("props_ouvertes", True)):
     ss.setdefault(cle, defaut)
 # autres types de promotion : type choisi, champs et cases « Faire apparaître »
 for cle, defaut in ([("w_promo_type", promos.STANDARD)]
@@ -268,6 +272,7 @@ def rouvrir(ident):
     ss.ajout_extra, ss.cand_extra, ss.extra_n = False, None, ss.extra_n + 1
     ss.props, ss.props_msg, ss.journal = [], "", []
     ss.props_autres, ss.journal_web, ss.info_nom = [], [], ""
+    ss.props_choisie, ss.props_ouvertes = None, True
     ss.reglages = reglages_defaut()
     for el, g in (e.get("reglages") or {}).items():
         if el in ss.reglages:
@@ -319,10 +324,11 @@ def fermer_ajout():
     ss.extra_n += 1
 
 
-def ajouter_extra(img, code="", nom=""):
-    """Ajoute une image à la gamme (MAX_VISUELS - 1 au plus, en plus du visuel principal) et referme l'ajout."""
+def ajouter_extra(img, code="", nom="", traite=False):
+    """Ajoute une image à la gamme (MAX_VISUELS - 1 au plus, en plus du visuel principal) et referme l'ajout.
+    traite : visuel déjà nettoyé (repris d'une affiche enregistrée), à imprimer tel quel."""
     if len(ss.extras) < MAX_VISUELS - 1:
-        ss.extras.append({"uid": _nouvel_uid(), "image": img, "nom": nom, "code": code, "traite": False})
+        ss.extras.append({"uid": _nouvel_uid(), "image": img, "nom": nom, "code": code, "traite": traite})
         ss.traitement_a_retablir = True  # pris en compte au prochain affichage, avant les cases concernées
     fermer_ajout()
 
@@ -347,6 +353,7 @@ def nouvelle_affiche():
     ss.code, ss.marque, ss.detail = "", "", ""
     ss.image, ss.journal, ss.props, ss.props_msg, ss.derniere_sel = None, [], [], "", None
     ss.props_autres, ss.journal_web, ss.info_nom = [], [], ""
+    ss.props_choisie, ss.props_ouvertes = None, True
     ss.derniere_collee = ss.derniere_collee_extra = None
     ss.extras, ss.ajout_extra, ss.cand_extra, ss.derniere_sel_extra = [], False, None, None
     ss.televerse_vu = None
@@ -416,6 +423,7 @@ def chercher_web(extra=()):
         statut.update(label="Recherche terminée", state="complete")
     ss.journal_web = res["journal"]
     ss.info_nom = ""
+    ss.props_choisie, ss.props_ouvertes = None, True  # nouvelles propositions : affichées en grand
     if res["verifies"]:
         ss.props, ss.props_autres, ss.props_msg = res["verifies"], res["autres"], ""
     else:
@@ -513,8 +521,6 @@ def proposer_choix_extra(cand):
             if choisi:
                 try:
                     img = cand["image"] if o["p"] is None else ip.rogner_marges_blanches(ip.obtenir_image(o["p"]))
-                    if cand["code"]:
-                        ip.enregistrer_image(cand["code"], img)
                     ajouter_extra(img, cand["code"], cand["nom"])
                     st.rerun()
                 except Exception as e:
@@ -561,6 +567,9 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
                     img2, marque_trouvee, detail_trouve, _journal = ip.rechercher(code2)
                 if not marque2 and not detail2:
                     nom2 = catalogue.nom_complet(marque_trouvee, detail_trouve) or code2
+                if img2 is not None and img2.info.get("origine") == "historique":
+                    ajouter_extra(img2, code2, nom2, traite=True)  # visuel d'une affiche enregistrée : repris tel quel
+                    st.rerun()
                 if img2 is not None and ip.analyser_image(img2)["studio"]:
                     ajouter_extra(img2, code2, nom2)  # visuel « site marchand » : pris directement
                     st.rerun()
@@ -651,7 +660,7 @@ with col_form:
             ss.derniere_sel = sel["ts"]
             ss.code = ip.nettoyer_code(sel["code"])
             ss.marque, ss.detail = catalogue.separer(sel.get("nom", ""), sel.get("marque", ""))
-            ss.props, ss.props_msg = [], ""
+            ss.props, ss.props_msg, ss.props_choisie, ss.props_ouvertes = [], "", None, True
             reinitialiser()
             retablir_traitement()
             with st.spinner("Recherche du visuel…"):
@@ -661,7 +670,10 @@ with col_form:
                 ss.marque, ss.detail = marque_trouvee, detail_trouve
             elif not ss.marque and marque_trouvee:  # nom connu, marque inconnue : on la déduit de la fiche en ligne
                 ss.marque, ss.detail = catalogue.separer(ss.detail, marque_trouvee)
-            if img is None or not ip.analyser_image(img)["studio"]:
+            if img is not None and img.info.get("origine") == "historique":
+                # visuel d'une affiche enregistrée : déjà nettoyé, imprimé tel quel (comme après « Rouvrir »)
+                ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = False, "Désactivée", True
+            elif img is None or not ip.analyser_image(img)["studio"]:
                 chercher_web()  # un visuel absent ou de type « photo » est remplacé par une proposition studio
 
         if ss.pop("traitement_a_retablir", False):  # après « Rouvrir », un nouveau visuel est nettoyé comme d'habitude
@@ -681,6 +693,7 @@ with col_form:
                     st.write("• " + ligne)
 
         slot_visuel = st.container()   # visuel retenu (rempli plus bas, une fois les réglages lus)
+        slot_options = st.container()  # case « Nettoyage IA », visible d'office sous le visuel
         slot_props = st.container()    # propositions de visuels (remplies après la recherche web éventuelle)
 
         with st.expander("Autre visuel : chercher, coller ou importer une image", expanded=ss.image is None):
@@ -716,65 +729,73 @@ with col_form:
                              "adresse), ou l'importer comme fichier ci-dessous.")
                 else:
                     ss.image = img
-                    ss.props, ss.props_autres = [], []
+                    ss.props_choisie, ss.props_ouvertes = None, False  # propositions repliées, toujours disponibles
                     retablir_traitement()
-                    if code_net:
-                        ip.enregistrer_image(code_net, img)
                     st.toast("Image collée : elle est utilisée pour l'affiche.", icon=":material/check_circle:")
             televerse = st.file_uploader("Ou importer un fichier image (glisser-déposer)",
                                          type=["png", "jpg", "jpeg", "webp"], key=f"televerse_{ss.raz}")
             if televerse is not None:
-                memoriser = st.checkbox("Mémoriser ce visuel pour ce code", value=True)
                 fichier_televerse = (televerse.name, televerse.size)
                 if ss.get("televerse_vu") != fichier_televerse:  # le fichier n'est pris en compte qu'une fois
                     ss.televerse_vu = fichier_televerse
                     img = ip.vers_rgb_blanc(Image.open(televerse))
                     ss.image = img
+                    ss.props_choisie, ss.props_ouvertes = None, False
                     retablir_traitement()
-                    if code_net and memoriser:
-                        ip.enregistrer_image(code_net, img)
 
         with slot_props:
             if ss.props:
-                if any(p.get("verifie") for p in ss.props):
-                    intro = ("Photos trouvées sur des sites marchands dont la page contient bien ce code, la plus "
-                             "utilisée d'abord. Vérifier l'image, puis la choisir (elle sera nettoyée automatiquement) :")
-                elif any(p.get("niveau") == "nom" for p in ss.props):
-                    intro = ("Aucune page ne contient ce code : ces photos viennent de pages dont le nom correspond. "
-                             "À vérifier avec soin, puis choisir :")
-                else:
-                    intro = ("Images du web non vérifiées (rien ne prouve qu'elles montrent ce produit). "
-                             "Vérifier l'image, puis la choisir :")
-                st.write(intro)
-                if ss.info_nom:
-                    st.caption(f"Nom relevé sur les sites marchands et repris dans les textes : « {ss.info_nom} » "
-                               "(à vérifier).")
-                cols = st.columns(4)
-                for i, p in enumerate(ss.props):
-                    with cols[i % 4]:
-                        st.image(miniature_proposition(p), use_container_width=True)
-                        choisi = st.button("Choisir", key=f"choix{i}",
-                                           type="primary" if est_meilleur_choix(p, i) else "secondary")
-                        st.caption(legende_proposition(p))
-                        if choisi:
-                            try:
-                                img = ip.rogner_marges_blanches(ip.obtenir_image(p))
-                                ss.image = img
-                                retablir_traitement()
-                                if code_net:
-                                    ip.enregistrer_image(code_net, img)
-                                ss.props, ss.props_autres = [], []
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Téléchargement impossible ({type(e).__name__}).")
-                if ss.props_autres and st.button("Voir aussi des images non vérifiées", key="voir_autres"):
-                    ss.props, ss.props_autres = list(ss.props) + list(ss.props_autres), []
-                    st.rerun()
+                # après un choix (ou un collage), les propositions restent accessibles, repliées
+                cadre = (st.container() if ss.props_ouvertes or ss.image is None else
+                         st.expander(f"Changer de photo : revoir les {len(ss.props)} photos proposées", expanded=False))
+                with cadre:
+                    if any(p.get("verifie") for p in ss.props):
+                        intro = ("Photos trouvées sur des sites marchands dont la page contient bien ce code, la "
+                                 "meilleure d'abord. Vérifier l'image, puis la choisir :")
+                    elif any(p.get("niveau") == "nom" for p in ss.props):
+                        intro = ("Aucune page ne contient ce code : ces photos viennent de pages dont le nom "
+                                 "correspond. À vérifier avec soin, puis choisir :")
+                    else:
+                        intro = ("Images du web non vérifiées (rien ne prouve qu'elles montrent ce produit). "
+                                 "Vérifier l'image, puis la choisir :")
+                    st.write(intro)
+                    if ss.info_nom:
+                        st.caption(f"Nom relevé sur les sites marchands et repris dans les textes : « {ss.info_nom} » "
+                                   "(à vérifier).")
+                    cols = st.columns(4)
+                    for i, p in enumerate(ss.props):
+                        retenue = ss.props_choisie is not None and p.get("image") == ss.props_choisie
+                        with cols[i % 4]:
+                            st.image(miniature_proposition(p), use_container_width=True)
+                            choisi = st.button("Photo retenue" if retenue else "Choisir", key=f"choix{i}",
+                                               disabled=retenue,
+                                               type="primary" if ss.props_choisie is None and est_meilleur_choix(p, i)
+                                               else "secondary")
+                            st.caption(legende_proposition(p))
+                            if choisi:
+                                try:
+                                    img = ip.rogner_marges_blanches(ip.obtenir_image(p))
+                                    ss.image = img
+                                    ss.props_choisie, ss.props_ouvertes = p.get("image"), False
+                                    retablir_traitement()
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Téléchargement impossible ({type(e).__name__}).")
+                    if ss.props_autres and st.button("Voir aussi des images non vérifiées", key="voir_autres"):
+                        ss.props, ss.props_autres = list(ss.props) + list(ss.props_autres), []
+                        st.rerun()
+
+        # --- Nettoyage IA : case visible d'office, sous le visuel retenu
+        with slot_options:
+            if ss.image is not None:
+                nettoyer_on = st.checkbox("Nettoyage IA : supprimer le fond, ne garder que le produit", key="w_nettoyer",
+                                          help="Décocher pour imprimer la photo telle quelle (par exemple si le "
+                                               "détourage abîme le produit).")
+            else:
+                nettoyer_on = bool(ss.w_nettoyer)
 
         # --- Réglages du visuel (repliés : la plupart du temps, les valeurs par défaut suffisent)
-        with st.expander("Réglages du visuel : fond, recadrage, netteté"):
-            nettoyer_on = st.checkbox("Nettoyer le visuel (supprimer le fond, ne garder que le produit)",
-                                      key="w_nettoyer")
+        with st.expander("Réglages du visuel : recadrage, netteté"):
             st.markdown("**Recadrage** (retirer un nom de site, un bord…)")
             r1, r2 = st.columns(2)
             rg = r1.slider("Rogner à gauche (%)", 0, 40, key="w_rg")
@@ -794,13 +815,10 @@ with col_form:
                 v1.image(_miniature_carree(ss.image, 260), caption=f"Original ({min(ss.image.size)} px)", width=130)
                 v2.image(_miniature_carree(visuel, 260), caption=f"Visuel retenu ({min(visuel.size)} px)", width=130)
                 st.caption(f"Traitement appliqué : {methode}.")
-                qualite = ip.analyser_image(ss.image)
                 if min(visuel.size) < 600:
                     st.warning(f"Image de petite taille ({min(visuel.size)} px) : elle risque d'être floue à "
                                "l'impression. Essayer la netteté « Rapide » dans les réglages du visuel, ou choisir "
                                "une image plus grande.")
-                elif not qualite["studio"]:
-                    st.caption("Visuel de type photo : essayer une autre proposition, ou coller une image sur fond blanc.")
         else:
             visuel = None
         autres_visuels = zone_autres_images(cat, nettoyer_on, mode_nettete) if ss.image is not None else []

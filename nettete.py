@@ -5,8 +5,11 @@
 Les modèles sont téléchargés une seule fois dans le dossier modeles/. Si le module ou le modèle est
 indisponible, un agrandissement classique avec accentuation est appliqué à la place.
 Un agrandissement ne peut pas recréer des détails absents de l'image d'origine (petits textes illisibles).
+Les derniers résultats sont gardés en mémoire (nombre limité) ; aucune image n'est écrite sur le disque.
 """
 import hashlib
+import shutil
+from collections import OrderedDict
 from pathlib import Path
 
 import requests
@@ -15,7 +18,8 @@ from PIL import Image, ImageFilter
 from chemins import CODE, DONNEES
 
 DOSSIER_MODELES = CODE / "modeles"
-DOSSIER_CACHE = DONNEES / "images" / "nettete"
+ANCIEN_DOSSIER = DONNEES / "images" / "nettete"  # ancien cache sur disque, supprimé au démarrage
+MAX_MEMO = 8  # résultats gardés en mémoire (les plus récents)
 MODELES = {
     "rapide": ("espcn", "ESPCN_x4.pb",
                "https://raw.githubusercontent.com/fannymonori/TF-ESPCN/master/export/ESPCN_x4.pb", 90_000),
@@ -23,7 +27,12 @@ MODELES = {
                 "https://raw.githubusercontent.com/Saafke/EDSR_Tensorflow/master/models/EDSR_x4.pb", 30_000_000),
 }
 COTE_MAX = 1800   # taille maximale du résultat (pixels)
-_memo = {}
+_memo = OrderedDict()
+
+
+def vider_ancien_cache() -> None:
+    """Supprime l'ancien cache d'images agrandies (versions précédentes de l'outil)."""
+    shutil.rmtree(ANCIEN_DOSSIER, ignore_errors=True)
 
 
 def _modele(mode: str) -> Path:
@@ -67,25 +76,17 @@ def ameliorer(img: Image.Image, mode: str = "rapide"):
     img = img.convert("RGB")
     cle = hashlib.sha1(img.resize((96, 96)).tobytes() + str(img.size).encode() + mode.encode()).hexdigest()[:16]
     if cle in _memo:
-        return _memo[cle]
-    fichier = DOSSIER_CACHE / f"{cle}.png"
-    fichier_txt = DOSSIER_CACHE / f"{cle}.txt"
-    if fichier.exists() and fichier_txt.exists():
-        _memo[cle] = (Image.open(fichier).convert("RGB"), fichier_txt.read_text(encoding="utf-8"))
+        _memo.move_to_end(cle)
         return _memo[cle]
     try:
         res = _agrandir_ia(img, mode)
         methode = "Netteté améliorée (IA, " + ("rapide" if mode == "rapide" else "haute qualité") + ")"
-        durable = True
     except Exception:
         res = _agrandir_classique(img)
         methode = "Netteté améliorée (agrandissement classique : modèle IA indisponible)"
-        durable = False
     if max(res.size) > COTE_MAX:
         res.thumbnail((COTE_MAX, COTE_MAX), Image.LANCZOS)
     _memo[cle] = (res, methode)
-    if durable:
-        DOSSIER_CACHE.mkdir(parents=True, exist_ok=True)
-        res.save(fichier)
-        fichier_txt.write_text(methode, encoding="utf-8")
+    while len(_memo) > MAX_MEMO:
+        _memo.popitem(last=False)
     return res, methode

@@ -3,19 +3,35 @@
 Méthode 1 (si le module « rembg » est installé) : détourage par intelligence artificielle,
   efficace sur les photos prises « sur le vif ».
 Méthode 2 (toujours disponible) : suppression d'un fond uni ou quasi uni, à partir des bords.
-Le résultat est mémorisé dans images/propres/ pour ne pas être recalculé.
+Les derniers résultats sont gardés en mémoire (nombre limité) pour ne pas être recalculés à chaque
+rafraîchissement de l'écran ; rien n'est écrit sur le disque.
 """
 import hashlib
-from pathlib import Path
+import shutil
+from collections import OrderedDict
 
 from PIL import Image, ImageDraw
 
 from chemins import DONNEES
 
-DOSSIER = DONNEES / "images" / "propres"
+ANCIEN_DOSSIER = DONNEES / "images" / "propres"  # ancien cache sur disque, supprimé au démarrage
 COTE_MAX_IA = 1800  # côté maximal (pixels) de l'image soumise au détourage par IA
+MAX_MEMO = 12       # résultats gardés en mémoire (les plus récents)
 _session = {"obj": None, "essai": 0}
-_memo = {}  # résultats déjà calculés dans ce processus (évite de recalculer à chaque rafraîchissement)
+_memo = OrderedDict()  # résultats déjà calculés dans ce processus (évite de recalculer à chaque rafraîchissement)
+
+
+def _memoriser(cle, valeur):
+    _memo[cle] = valeur
+    _memo.move_to_end(cle)
+    while len(_memo) > MAX_MEMO:
+        _memo.popitem(last=False)
+    return valeur
+
+
+def vider_ancien_cache() -> None:
+    """Supprime l'ancien cache d'images nettoyées (versions précédentes de l'outil)."""
+    shutil.rmtree(ANCIEN_DOSSIER, ignore_errors=True)
 
 
 def _rembg_session():
@@ -107,13 +123,8 @@ def nettoyer(img: Image.Image):
     """Retourne (image propre sur fond blanc, description de la méthode employée)."""
     img = img.convert("RGB")
     cle = hashlib.sha1(img.resize((128, 128)).tobytes() + str(img.size).encode()).hexdigest()[:16]
-    DOSSIER.mkdir(parents=True, exist_ok=True)
-    fichier_img = DOSSIER / f"{cle}.png"
-    fichier_txt = DOSSIER / f"{cle}.txt"
     if cle in _memo:
-        return _memo[cle]
-    if fichier_img.exists() and fichier_txt.exists():
-        _memo[cle] = (Image.open(fichier_img).convert("RGB"), fichier_txt.read_text(encoding="utf-8"))
+        _memo.move_to_end(cle)
         return _memo[cle]
 
     rgba = _detourage_ia(img)
@@ -126,8 +137,4 @@ def nettoyer(img: Image.Image):
         methode = "Fond non détecté : visuel simplement recadré"
     else:
         propre = _sur_blanc_et_rogner(rgba)
-    _memo[cle] = (propre, methode)
-    if methode.startswith("Détourage automatique"):  # seuls les résultats de l'IA sont conservés sur disque
-        propre.save(fichier_img)
-        fichier_txt.write_text(methode, encoding="utf-8")
-    return propre, methode
+    return _memoriser(cle, (propre, methode))
