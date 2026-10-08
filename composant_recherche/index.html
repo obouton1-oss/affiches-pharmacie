@@ -30,12 +30,23 @@ const SOURCES_EN_LIGNE = [
 ];
 let catalogue = [], enLigne = true, libelle = "";
 let resultats = [], actif = -1, attente = false, termine = false;
-let minuteur = null, ctrl = null;
+let minuteur = null, ctrl = null, dejaFocus = false;
 const cache = new Map();
 const q = document.getElementById("q"), liste = document.getElementById("liste");
 
 function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data||{}), "*"); }
 function hauteur(){ post("streamlit:setFrameHeight", {height: document.getElementById("boite").offsetHeight + 4}); }
+// À l'ouverture de la page et à chaque « Nouvelle affiche » : le curseur est déjà dans le champ (sauf écran tactile).
+// remonter : après « Nouvelle affiche » / « passer à la suivante », la page remonte aussi pour montrer le champ.
+function mettreAuPoint(remonter){
+  if(window.matchMedia && window.matchMedia("(pointer: coarse)").matches) return;
+  setTimeout(() => {
+    try{
+      if(remonter && window.frameElement && window.frameElement.scrollIntoView) window.frameElement.scrollIntoView({block: "center", behavior: "smooth"});
+    }catch(e){}
+    q.focus({preventScroll: true});
+  }, 150);
+}
 function norm(s){ return (s||"").normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase(); }
 function echapper(s){ return s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
@@ -148,6 +159,7 @@ window.addEventListener("message", e => {
   catalogue = a.catalogue || [];
   enLigne = a.en_ligne !== false;
   if(a.libelle && a.libelle !== libelle){ libelle = a.libelle; document.getElementById("lib").textContent = libelle; }
+  if(a.focus && !dejaFocus){ dejaFocus = true; mettreAuPoint(!!a.remonter); }
   const th = d.theme;
   if(th){
     const r = document.documentElement.style;
