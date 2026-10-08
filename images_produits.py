@@ -7,7 +7,8 @@ Ordre de recherche :
   4. Recherche web VÉRIFIÉE (rechercher_visuels) : des moteurs de recherche trouvent des pages qui citent le code ;
      chaque page est ouverte et ne compte que si le code y figure réellement. Aucune liste de sites n'est figée :
      un site qui change d'adresse est retrouvé par le moteur, une page qui ne répond plus est ignorée.
-     À défaut : pages dont le nom du produit correspond (« probable »), puis images web non vérifiées.
+     À défaut : pages dont le nom du produit correspond (« probable »), puis images web dont le titre cite le code
+     ou correspond au nom du produit (jamais d'images sans rapport avec lui).
   5. Import ou collage manuel d'une image (collage depuis le presse-papiers, glisser-déposer, fichier).
 Stockage : aucune image trouvée, choisie ou collée n'est conservée sur le disque. Seuls les visuels des affiches
 enregistrées le sont, dans l'historique (voir historique.py) ; supprimer l'affiche supprime ses visuels.
@@ -56,6 +57,7 @@ DOMAINES_IGNORES = ("google.", "facebook.", "instagram.", "pinterest.", "youtube
                     "wikipedia.", "duckduckgo.", "bing.com")
 RANG_NIVEAU = {"nom": 0, "moyen": 1, "fort": 2}
 IMAGE_A_IGNORER = re.compile(r"logo|sprite|favicon|placeholder|no-?image|spacer|\.svg|\.gif(\?|$)", re.I)
+CODES_REFUS = (401, 403, 406, 429, 451, 503)  # réponses d'un site qui refuse les programmes : 2e essai « en navigateur »
 
 
 def nettoyer_code(brut: str) -> str:
@@ -127,6 +129,33 @@ def _url_publique(url: str) -> bool:
         return True  # nom de domaine
 
 
+class _ErreurHTTP(Exception):
+    """Réponse d'erreur d'un site (code HTTP), pour le journal de la recherche."""
+
+    def __init__(self, code):
+        super().__init__(f"HTTP {code}")
+        self.code_http = code
+
+
+def _refus_du_site(e: Exception) -> bool:
+    """Le site a refusé la requête (ou coupé la connexion) : un 2e essai avec l'empreinte d'un vrai navigateur peut passer."""
+    if isinstance(e, requests.exceptions.HTTPError):
+        return getattr(e.response, "status_code", 0) in CODES_REFUS
+    return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.SSLError))
+
+
+def _get_navigateur(url: str, entetes: dict, delai):
+    """GET avec l'empreinte réseau d'un navigateur (module primp, installé avec ddgs) : beaucoup de sites refusent
+    (HTTP 403) les programmes ordinaires mais acceptent un navigateur. Retourne la réponse primp (code < 400)."""
+    import primp
+    r = primp.Client(timeout=max(delai) if isinstance(delai, tuple) else delai, impersonate="random",
+                     impersonate_os="random").get(url, headers={k: v for k, v in entetes.items()
+                                                                if k.lower() != "user-agent"})
+    if r.status_code >= 400:
+        raise _ErreurHTTP(r.status_code)
+    return r
+
+
 def telecharger_octets(url: str, referer: str = "", max_octets: int = MAX_IMAGE_OCTETS, delai=(5, 20)) -> bytes:
     """Télécharge un fichier image (taille limitée). Lève une exception en cas d'échec."""
     if not _url_publique(url):
@@ -135,14 +164,22 @@ def telecharger_octets(url: str, referer: str = "", max_octets: int = MAX_IMAGE_
     entetes["Accept"] = "image/png,image/jpeg,image/webp,image/*;q=0.8,*/*;q=0.5"
     if referer:
         entetes["Referer"] = referer
-    with requests.get(url, headers=entetes, timeout=delai, stream=True) as r:
-        r.raise_for_status()
-        octets = bytearray()
-        for bloc in r.iter_content(65536):
-            octets += bloc
-            if len(octets) > max_octets:
-                raise ValueError("image trop volumineuse")
-    return bytes(octets)
+    try:
+        with requests.get(url, headers=entetes, timeout=delai, stream=True) as r:
+            r.raise_for_status()
+            octets = bytearray()
+            for bloc in r.iter_content(65536):
+                octets += bloc
+                if len(octets) > max_octets:
+                    raise ValueError("image trop volumineuse")
+        return bytes(octets)
+    except Exception as e:
+        if not _refus_du_site(e):
+            raise
+        octets = _get_navigateur(url, entetes, delai).content  # le site refusait le programme : 2e essai en navigateur
+        if len(octets) > max_octets:
+            raise ValueError("image trop volumineuse")
+        return bytes(octets)
 
 
 def image_depuis_octets(octets: bytes) -> Image.Image:
@@ -289,6 +326,12 @@ def _site(url: str) -> str:
 
 
 # --------------------------------------------------------------------------- Moteurs de recherche
+def _detail_erreur(e: Exception) -> str:
+    """Nature d'un incident, lisible dans le journal : type d'erreur et début du message."""
+    texte = " ".join(str(e).split())
+    return type(e).__name__ + (f" ({texte[:90]})" if texte else "")
+
+
 def _ddgs(methode, requete, **options):
     """Une recherche (« text » ou « images ») par les moteurs du module ddgs ; un 2e essai en cas d'échec."""
     from ddgs import DDGS
@@ -302,23 +345,50 @@ def _ddgs(methode, requete, **options):
     raise erreur
 
 
+def _texte_bing(requete):
+    """Recherche de pages par Bing, directement (moteur fourni avec ddgs mais désactivé par défaut) : repli quand
+    les moteurs de texte de ddgs échouent tous (adresses de l'hébergeur bloquées, par exemple)."""
+    from ddgs.engines.bing import Bing
+    res = Bing(timeout=8).search(requete, region="fr-fr")
+    if not res:
+        raise ValueError("aucun résultat ou réponse refusée")
+    return [{"title": r.title, "href": r.href, "body": r.body} for r in res]
+
+
 def _recherches(methode, requetes, **options):
-    """Plusieurs recherches, 3 à la fois. Retourne (liste de résultats par requête, erreurs lisibles)."""
+    """Plusieurs recherches, 3 à la fois. Retourne (liste de résultats par requête, incidents lisibles).
+    Recherche de pages (« text ») : si les moteurs de ddgs échouent, Bing est interrogé directement ; dès qu'ils
+    échouent pour une autre raison qu'une absence de résultat, ils ne sont plus sollicités pour les requêtes suivantes."""
     try:
         importlib.import_module("ddgs")
     except Exception:
         return [], ["module de recherche web non installé (ddgs)"]
     erreurs = []
+    etat = {"ddgs_ko": False, "bing": 0}
 
     def une(req):
-        try:
-            return _ddgs(methode, req, **options)
-        except Exception as e:
-            erreurs.append(f"« {req[:40]} » : {type(e).__name__}")
-            return []
+        cause = ""
+        if not (methode == "text" and etat["ddgs_ko"]):
+            try:
+                return _ddgs(methode, req, **options)
+            except Exception as e:
+                cause = "ddgs " + _detail_erreur(e)
+                if methode == "text" and "No results" not in str(e):
+                    etat["ddgs_ko"] = True
+        if methode == "text":
+            try:
+                res = _texte_bing(req)
+                etat["bing"] += 1
+                return res
+            except Exception as e:
+                cause = (cause + " ; " if cause else "") + "Bing " + _detail_erreur(e)
+        erreurs.append(f"« {req[:30]} » — {cause}")
+        return []
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         lots = list(ex.map(une, list(dict.fromkeys(r for r in requetes if r.strip()))))
+    if etat["bing"]:
+        erreurs.append(f"moteurs ddgs indisponibles, {etat['bing']} recherche(s) de pages faite(s) par Bing")
     return lots, erreurs
 
 
@@ -335,13 +405,26 @@ def images_web(requetes):
     return bruts, erreurs
 
 
-# --------------------------------------------------------------------------- Images du web (non vérifiées)
-def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int = 350, bruts=None):
-    """Propositions d'images issues d'une recherche d'images web, classées par ressemblance à un visuel
-    de site marchand : fond blanc uni, haute résolution, titre proche du nom du produit.
-    Ces images ne sont PAS vérifiées (rien ne prouve qu'elles montrent le bon produit).
+# --------------------------------------------------------------------------- Images du web (code non vérifié sur la page)
+ACCORD_TITRE_MIN = 0.66  # part des mots du nom du produit à retrouver dans le titre d'une image (2 mots au moins)
+
+
+def _texte_resultat(r: dict) -> str:
+    """Ce qu'un résultat d'images dit de lui-même : titre, adresse de la page, adresse de l'image."""
+    return " ".join([r.get("title") or "", unquote(r.get("url") or ""), unquote(r.get("image") or "")])
+
+
+def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int = 350, bruts=None, code: str = ""):
+    """Propositions d'images issues d'une recherche d'images web. Une image n'est gardée que si elle a un rapport
+    avec le produit :
+      niveau « indice » : le code figure dans son titre ou dans l'adresse de son image ou de sa page ;
+      niveau « titre »  : son titre contient les mots du nom du produit (2 mots au moins, 2/3 d'entre eux).
+    Toutes les autres, sans rapport avec le produit (une recherche sur un simple numéro en renvoie beaucoup),
+    sont écartées. Le code n'est PAS vérifié sur la page : à valider visuellement par l'utilisateur.
+    Classement : indice d'abord, puis ressemblance à un visuel de site marchand (fond blanc uni, haute résolution,
+    titre proche du nom).
     bruts : résultats d'une recherche d'images déjà faite (sinon la recherche est lancée avec requetes).
-    Retourne (liste de dicts, message). À valider visuellement par l'utilisateur."""
+    Retourne (liste de dicts, message si la liste est vide)."""
     erreur = ""
     if bruts is None:
         if isinstance(requetes, str):
@@ -349,18 +432,33 @@ def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int =
         bruts, erreurs = images_web(requetes)
         if erreurs and not bruts:
             erreur = f"Recherche web indisponible ({erreurs[0]})."
-    vus, candidats = set(), []
+    motif = _motif_code(nettoyer_code(code)) if nettoyer_code(code) else None
+    mots = sorted(set(_mots_utiles(nom)))
+    vus, candidats, ecartees = set(), [], 0
     for r in bruts:
         url = r.get("image")
         if not url or url in vus:
             continue
         vus.add(url)
-        w, h = int(r.get("width") or 0), int(r.get("height") or 0)
+        texte = _texte_resultat(r)
+        cite_code = bool(motif and motif.search(texte))
+        accord = 0.0
+        if len(mots) >= 2:
+            presents = set(_mots_utiles(texte))
+            accord = sum(1 for m in mots if m in presents) / len(mots)
+        if not cite_code and accord < ACCORD_TITRE_MIN:
+            ecartees += 1
+            continue
+        try:
+            w, h = int(r.get("width") or 0), int(r.get("height") or 0)
+        except (TypeError, ValueError):
+            w = h = 0
         if w and h and min(w, h) < taille_min:
             continue
         candidats.append({"miniature": r.get("thumbnail") or url, "image": url, "titre": r.get("title", ""),
                           "site": _site(r.get("url") or url), "page": r.get("url") or "",
-                          "largeur": w, "hauteur": h, "verifie": False, "niveau": "non vérifié"})
+                          "largeur": w, "hauteur": h, "verifie": False,
+                          "niveau": "indice" if cite_code else "titre", "accord": accord})
     candidats = candidats[:24]
 
     def evaluer(c):
@@ -373,18 +471,22 @@ def propositions_web(requetes, nom: str = "", nombre: int = 8, taille_min: int =
         c["blanc"], c["studio"] = a["blanc"], a["studio"]
         return c
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        candidats = list(ex.map(evaluer, candidats))
-
-    mots = _mots_utiles(nom)
+    if candidats:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            candidats = list(ex.map(evaluer, candidats))
     for c in candidats:
-        titre = " ".join(_mots_utiles(c["titre"]))
-        pertinence = (sum(1 for m in mots if m in titre) / len(mots)) if mots else 0.5
         resolution = min(1.0, min(c["largeur"] or 400, c["hauteur"] or 400) / 800)
-        c["score"] = 100 * c["blanc"] + 40 * resolution + 30 * pertinence
+        c["score"] = 100 * c["blanc"] + 40 * resolution + 30 * c["accord"] + (60 if c["niveau"] == "indice" else 0)
     candidats.sort(key=lambda c: -c["score"])
     sortie = candidats[:nombre]
-    return sortie, ("" if sortie else (erreur or "Aucune proposition suffisamment grande trouvée."))
+    if sortie:
+        return sortie, ""
+    if erreur:
+        return [], erreur
+    if ecartees:
+        return [], (f"{ecartees} images trouvées, toutes sans rapport avec le produit (ni le code ni le nom dans le "
+                    "titre) : écartées.")
+    return [], "Aucune proposition suffisamment grande trouvée."
 
 
 # --------------------------------------------------------------------------- Recherche vérifiée par le code
@@ -547,10 +649,7 @@ def analyser_page(html: str, url: str, code: str, nom: str = ""):
             "marque": marque if len(marque) <= 40 else "", "images": propres, "occurrences": occurrences}
 
 
-def _telecharger_page(url: str):
-    """Télécharge une page web (taille limitée). Retourne (texte, adresse finale)."""
-    if not _url_publique(url):
-        raise ValueError("adresse non autorisée")
+def _page_requests(url: str):
     entetes = dict(NAVIGATEUR)
     entetes["Accept"] = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"
     with requests.get(url, headers=entetes, timeout=(4, 8), stream=True) as r:
@@ -573,7 +672,41 @@ def _telecharger_page(url: str):
         return texte, r.url
 
 
+def _page_navigateur(url: str):
+    """2e essai d'une page refusée : requête avec l'empreinte d'un navigateur (voir _get_navigateur)."""
+    entetes = dict(NAVIGATEUR)
+    entetes["Accept"] = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"
+    r = _get_navigateur(url, entetes, 8)
+    finale = str(getattr(r, "url", "") or url)
+    if not _url_publique(finale):
+        raise ValueError("adresse non autorisée")
+    type_ = str((getattr(r, "headers", None) or {}).get("content-type", "")).lower()
+    if type_ and "html" not in type_ and "xml" not in type_:
+        raise ValueError("ce n'est pas une page web")
+    return r.text[:MAX_PAGE_OCTETS], finale
+
+
+def _telecharger_page(url: str, trace=None):
+    """Télécharge une page web (taille limitée). Retourne (texte, adresse finale).
+    Un site qui refuse le programme (HTTP 403, connexion coupée…) est réessayé « en navigateur » ; trace (liste)
+    reçoit « navigateur » quand ce 2e essai a réussi."""
+    if not _url_publique(url):
+        raise ValueError("adresse non autorisée")
+    try:
+        return _page_requests(url)
+    except Exception as e:
+        if not _refus_du_site(e):
+            raise
+        resultat = _page_navigateur(url)
+        if trace is not None:
+            trace.append("navigateur")
+        return resultat
+
+
 def _motif_erreur(e: Exception) -> str:
+    code = getattr(e, "code_http", None)
+    if code:
+        return f"HTTP {code} même en navigateur"
     reponse = getattr(e, "response", None)
     if reponse is not None:
         return f"HTTP {reponse.status_code}"
@@ -582,16 +715,20 @@ def _motif_erreur(e: Exception) -> str:
 
 def _verifier_pages(urls, code, nom="", delai=DELAI_ETAPE):
     """Ouvre les pages en parallèle et garde celles qui parlent du produit.
-    Retourne (pages confirmées : liste de dicts, bilan : {'refus': [...], 'sans_code': n, 'lentes': n})."""
-    bilan = {"refus": [], "sans_code": 0, "lentes": 0}
+    Retourne (pages confirmées : liste de dicts, bilan : {'refus': [...], 'sans_code': n, 'lentes': n,
+    'navigateur': pages obtenues seulement au 2e essai « en navigateur »})."""
+    bilan = {"refus": [], "sans_code": 0, "lentes": 0, "navigateur": 0}
     if not urls:
         return [], bilan
 
     def lire(url):
+        trace = []
         try:
-            html, finale = _telecharger_page(url)
+            html, finale = _telecharger_page(url, trace)
         except Exception as e:
             return ("refus", url, _motif_erreur(e))
+        if trace:
+            bilan["navigateur"] += 1
         info = analyser_page(html, finale, code, nom)
         if info is None:
             return ("sans_code", url, "")
@@ -637,10 +774,11 @@ def _url_examinable(u: str) -> bool:
 
 def _urls_de_recherche(requetes, code):
     """Pages trouvées par les moteurs de recherche (texte), sans doublon.
-    Retourne (adresses dont le résultat cite déjà le code, autres adresses, erreurs lisibles)."""
+    Retourne (adresses dont le résultat cite déjà le code, autres adresses, incidents lisibles,
+    titres des résultats qui citent le code : le nom du produit s'y lit même si la page ne s'ouvre pas)."""
     lots, erreurs = _recherches("text", requetes, region="fr-fr", max_results=15)
     motif = _motif_code(code)
-    vus, avec, sans = set(), [], []
+    vus, avec, sans, titres = set(), [], [], []
     for lot in lots:
         for r in lot:
             u = (r.get("href") or "").strip()
@@ -648,12 +786,36 @@ def _urls_de_recherche(requetes, code):
                 continue
             vus.add(_cle_url(u))
             texte = " ".join([unquote(u), r.get("title") or "", r.get("body") or ""])
-            (avec if motif.search(texte) else sans).append(u)
-    return avec, sans, erreurs
+            if motif.search(texte):
+                avec.append(u)
+                if r.get("title"):
+                    titres.append(r["title"])
+            else:
+                sans.append(u)
+    return avec, sans, erreurs, titres
 
 
-def _pages_des_images(bruts, code, mots_nom=()):
-    """Pages d'origine des résultats d'images ; celles dont le titre cite le code, puis le nom, en premier."""
+SEPARATEURS_TITRE = re.compile(r"\s+[|–—:•»]\s+|\s+-\s+")
+
+
+def _nom_des_titres(titres, code):
+    """Nom et marque du produit lus dans les titres de résultats de recherche qui citent le code
+    (« Avène Cleanance Gel nettoyant 400 ml - Pharmacie X » : on garde la partie qui ressemble le plus aux autres)."""
+    motif = _motif_code(code)
+    noms = []
+    for t in titres:
+        for segment in SEPARATEURS_TITRE.split(t or ""):
+            segment = " ".join(motif.sub("", segment).split()).strip(" -–—:|,;")
+            if len(_mots_utiles(segment)) >= 2 and 8 <= len(segment) <= 100:
+                noms.append(segment)
+                break
+    return _nom_consensus([{"nom": n, "marque": "", "niveau": "moyen"} for n in noms])
+
+
+def _pages_des_images(bruts, code, mots_nom=(), hors_sujet=6):
+    """Pages d'origine des résultats d'images ; celles dont le titre cite le code, puis le nom, en premier.
+    Celles dont ni le titre ni l'adresse ne citent le code ou le nom (résultats sans rapport, fréquents quand la
+    recherche porte sur un simple numéro) ne sont gardées qu'au nombre de hors_sujet."""
     motif = _motif_code(code)
     vus, notees = set(), []
     for r in bruts:
@@ -665,7 +827,9 @@ def _pages_des_images(bruts, code, mots_nom=()):
         mots_titre = _mots_utiles(titre)
         note = 2 if motif.search(titre) else (1 if mots_nom and any(m in mots_titre for m in mots_nom) else 0)
         notees.append((note, len(notees), u))
-    return [u for _, _, u in sorted(notees, key=lambda x: (-x[0], x[1]))]
+    classees = sorted(notees, key=lambda x: (-x[0], x[1]))
+    pertinentes = [u for n, _, u in classees if n > 0]
+    return pertinentes + [u for n, _, u in classees if n == 0][:hors_sujet]
 
 
 def _empreinte(img: Image.Image):
@@ -803,22 +967,31 @@ def _nom_pour_requete(nom: str, marque: str = "") -> str:
 
 
 def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int = 12, progression=None):
-    """Recherche web du visuel (voir _rechercher_visuels). En cas d'incident imprévu, l'ancienne recherche d'images
-    (non vérifiée) prend le relais : l'écran n'est jamais bloqué."""
+    """Recherche web du visuel (voir _rechercher_visuels). En cas d'incident imprévu, une recherche d'images plus
+    simple (filtrée : titre citant le code ou le nom) prend le relais : l'écran n'est jamais bloqué."""
     try:
         return _rechercher_visuels(code, nom, requetes_extra, nombre, progression)
     except Exception as e:
         code = nettoyer_code(code)
         try:
-            autres, msg = propositions_web([code] + ([f"{nom} {code}"] if nom else []), nom=nom, nombre=nombre)
+            autres, msg = propositions_web([code] + ([f"{nom} {code}"] if nom else []), nom=nom, nombre=nombre,
+                                           code=code)
         except Exception:
             autres, msg = [], ""
         return {"verifies": [], "autres": autres, "nom": "", "marque": "",
-                "journal": [f"Recherche vérifiée interrompue ({type(e).__name__}) : images web non vérifiées."]
+                "journal": [f"Recherche vérifiée interrompue ({_detail_erreur(e)}) : images web filtrées seulement."]
                 + ([msg] if msg else [])}
 
 
 BUDGET_RECHERCHE = 45  # secondes : passé ce délai, la recherche élargie par le nom n'est pas lancée
+
+
+def _incidents(erreurs) -> str:
+    """Incidents des moteurs de recherche pour le journal : causes distinctes, avec leur nombre."""
+    if not erreurs:
+        return ""
+    groupes = Counter(e.partition(" — ")[2] or e for e in erreurs)
+    return " · incidents : " + " | ".join(f"{n} × {c}" if n > 1 else c for c, n in groupes.most_common(3))
 
 
 def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=None):
@@ -826,9 +999,10 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
       1. moteurs de recherche (pages et images) interrogés avec le code, sous plusieurs formulations ;
          chaque page trouvée (y compris la page d'origine de chaque image) est ouverte et ne compte que si
          le code y figure ;
-      2. si moins de 4 pages confirmées : recherche élargie par le nom (connu, saisi, ou relevé sur une
-         page confirmée), les pages trouvées étant toujours vérifiées par le code ;
-      3. à défaut de code retrouvé : pages au nom correspondant (« probables »), puis images non vérifiées."""
+      2. si moins de 4 pages confirmées : recherche élargie par le nom (connu, saisi, ou relevé sur une page
+         confirmée ou dans les titres des résultats), les pages trouvées étant toujours vérifiées par le code ;
+      3. à défaut de code retrouvé : pages au nom correspondant (« probables »), puis images web dont le titre cite
+         le code ou correspond au nom (code non vérifié) ; les images sans rapport avec le produit sont écartées."""
     debut = time.time()
     code = nettoyer_code(code)
     sortie = {"verifies": [], "autres": [], "nom": "", "marque": "", "journal": []}
@@ -847,7 +1021,7 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
     extras = [x.strip() for x in requetes_extra if x and x.strip()]
     nom = (nom or "").strip()
     nom_ref = nom or (extras[0] if extras else "")
-    deja, pages, tous_bruts = set(), [], []
+    deja, pages, tous_bruts, titres_code = set(), [], [], []
     compte = {"pages": 0}
 
     def resume(pages_, bilan_, titre):
@@ -863,6 +1037,8 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
         if bilan_["refus"]:
             j.append("Pages inaccessibles : " + ", ".join(bilan_["refus"][:6])
                      + (" …" if len(bilan_["refus"]) > 6 else "") + ".")
+        if bilan_.get("navigateur"):
+            j.append(f"{bilan_['navigateur']} pages n'ont répondu qu'au 2e essai « en navigateur ».")
         if bilan_["sans_code"] or bilan_["lentes"]:
             j.append(f"Pages écartées : {bilan_['sans_code']} sans le code, {bilan_['lentes']} trop lentes.")
 
@@ -871,13 +1047,14 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_texte = ex.submit(_urls_de_recherche, req_texte, code)
             f_images = ex.submit(images_web, req_images)
-            avec, sans, err_t = f_texte.result()
+            avec, sans, err_t, titres = f_texte.result()
             bruts, err_i = f_images.result()
         tous_bruts.extend(bruts)
-        erreurs = err_t + err_i
+        titres_code.extend(titres)
+        nb_img_code = sum(1 for r in bruts if _motif_code(code).search(_texte_resultat(r)))
         j.append(f"{titre} : {len(set(req_texte)) + len(set(req_images))} recherches · {len(avec)} pages citant le "
-                 f"code, {len(sans)} autres pages, {len(bruts)} images"
-                 + (f" · incidents : {' ; '.join(erreurs[:3])}" if erreurs else "") + ".")
+                 f"code, {len(sans)} autres pages, {len(bruts)} images dont {nb_img_code} citant le code"
+                 + _incidents(err_t + err_i) + ".")
         return avec, sans, bruts
 
     def examiner(urls, titre, nom_verif):
@@ -897,7 +1074,7 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
 
     # --- 1. le code
     req_texte = [code, f'"{code}"', f"code EAN {code}"]
-    req_images = [code, f"{code} pharmacie"]
+    req_images = [code, f'"{code}"', f"{code} pharmacie"]
     if nom:
         req_texte.append(f"{_nom_pour_requete(nom)} {code}")
         req_images.append(f"{_nom_pour_requete(nom)} {code}")
@@ -910,7 +1087,14 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
 
     # --- 2. recherche élargie par le nom, pages toujours vérifiées par le code
     nom_trouve, marque_trouvee = _nom_consensus(pages)
+    if not nom_trouve and titres_code:  # aucune page ouverte, mais les résultats de recherche donnent le nom
+        nom_trouve, marque_trouvee = _nom_des_titres(titres_code, code)
+        if nom_trouve:
+            j.append(f"Nom lu dans les titres des résultats de recherche : « {nom_trouve[:70]} » (à vérifier).")
     nom_rebond = nom_ref or nom_trouve
+    if (nom_ref and nom_trouve and len(nom_trouve) > len(nom_ref)
+            and set(_mots_utiles(nom_ref)) <= set(_mots_utiles(nom_trouve))):
+        nom_rebond = nom_trouve  # le nom relevé complète celui qu'on avait (« Avene Gel nettoyant » → « … Cleanance … »)
     if len([p for p in pages if p["niveau"] != "nom"]) < 4 and len(_mots_utiles(nom_rebond)) >= 2:
         if time.time() - debut > BUDGET_RECHERCHE:
             j.append("Étape 2 non lancée (recherche déjà longue) : « Affiner la recherche » permet de la relancer.")
@@ -920,17 +1104,25 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
                                             f"Étape 2 (nom « {court[:45]} »)")
             pages += examiner(avec2 + _pages_des_images(bruts2, code, _mots_utiles(court)) + sans2,
                               "Étape 2 (nom)", nom_rebond)
+            nom_trouve2, marque2 = _nom_consensus(pages)
+            if nom_trouve2:
+                nom_trouve, marque_trouvee = nom_trouve2, marque2
 
-    # --- 3. photos, nom, et à défaut images non vérifiées
+    # --- 3. photos, nom, et à défaut images dont le titre est cohérent
     etape("Téléchargement des photos…")
     candidats = _candidats_de_pages(pages)
     confirmes = [c for c in candidats if c["niveau"] != "nom"]
     probables = [c for c in candidats if c["niveau"] == "nom"]
     sortie["verifies"] = (confirmes or probables)[:nombre]  # les « probables » ne servent qu'à défaut
     sortie["nom"], sortie["marque"] = _nom_consensus(pages)
+    if not sortie["nom"]:
+        sortie["nom"], sortie["marque"] = nom_trouve, marque_trouvee
     if not confirmes and tous_bruts:
-        etape("Préparation des images non vérifiées…")
-        sortie["autres"], _ = propositions_web([], nom=nom_ref or nom_trouve, nombre=nombre, bruts=tous_bruts)
+        etape("Tri des images du web…")
+        sortie["autres"], msg = propositions_web([], nom=nom_rebond, nombre=nombre, bruts=tous_bruts, code=code)
+        n_indice = sum(1 for c in sortie["autres"] if c["niveau"] == "indice")
+        j.append(f"Images du web : {n_indice} citant le code, {len(sortie['autres']) - n_indice} au titre cohérent avec "
+                 f"le nom" + (f" ({msg})" if msg else "") + ".")
     j.append(f"Résultat : {len(confirmes)} photo(s) confirmée(s) par le code, {len(probables)} probable(s)"
              + (" (non retenues, des photos confirmées existent)" if confirmes and probables else "")
              + f", {compte['pages']} pages examinées, {time.time() - debut:.0f} s.")
