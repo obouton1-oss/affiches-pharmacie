@@ -137,6 +137,12 @@ def _texte_sous_prix(c, texte, cx, y_bas, largeur, h, reg, couleur):
     return y_bas + bloc + h * 0.012
 
 
+def _logo_marque(c, img, cx, y_bas, hauteur):
+    """Logo de marque (image PIL) centré en cx, de la hauteur donnée, posé sur y_bas."""
+    largeur = hauteur * img.width / img.height
+    c.drawImage(ImageReader(img), cx - largeur / 2, y_bas, largeur, hauteur, mask="auto")
+
+
 def _vignette(c, x, y, w, h, e, st):
     """Vignette d'une affiche. (x, y) : coin inférieur gauche. e : entrée de l'historique, avec « _images » (liste
     d'images PIL : le visuel principal puis les autres)."""
@@ -151,6 +157,7 @@ def _vignette(c, x, y, w, h, e, st):
     c.roundRect(x, y, w, h, 3 * mm, stroke=1, fill=1)
 
     marque, detail = (e.get("marque") or "").strip(), (e.get("detail") or "").strip()
+    logo_m = e.get("_logo_marque") if marque else None  # logo de la marque, imprimé à la place de son nom
     if not marque and detail:
         marque, detail = detail, ""
     if e.get("majuscules", True):
@@ -181,11 +188,16 @@ def _vignette(c, x, y, w, h, e, st):
             bloc = len(lignes) * t * 1.15
             _lignes_centrees(c, lignes, t, reg, col_nom, cx, y_cur + bloc)
             y_cur += bloc + h * 0.012
-        lignes, t = af._ajuster_titre(marque or " ", bold, zone_w, h * 0.10, h * 0.070,
-                                      max_lignes=2 if detail else 3)
-        bloc = len(lignes) * t * 1.15
-        _lignes_centrees(c, lignes, t, bold, col_nom, cx, y_cur + bloc)
-        y_cur += bloc + h * 0.015
+        if logo_m is not None:
+            hl = min(h * 0.075, zone_w * 0.85 * logo_m.height / logo_m.width)
+            _logo_marque(c, logo_m, cx, y_cur, hl)
+            y_cur += hl + h * 0.015
+        else:
+            lignes, t = af._ajuster_titre(marque or " ", bold, zone_w, h * 0.10, h * 0.070,
+                                          max_lignes=2 if detail else 3)
+            bloc = len(lignes) * t * 1.15
+            _lignes_centrees(c, lignes, t, bold, col_nom, cx, y_cur + bloc)
+            y_cur += bloc + h * 0.015
         r = af.rayon_pastille(pastille, min(w, h * 1.1), bold) if pastille else 0.0
         _images(c, images, x + pad, y_cur, zone_w, y + h - pad - y_cur, sur_le_bas=True,
                 coin=("droite", 1.95 * r, 1.95 * r) if pastille else None)
@@ -210,16 +222,27 @@ def _vignette(c, x, y, w, h, e, st):
         y_cur = _prix_barre(c, prix_barre, cx, y_cur, tb, reg, col_sec) + h * 0.015
     libre_haut, libre_bas = y + h - pad, y_cur
     dispo = libre_haut - libre_bas
-    if detail:
+    hl = 0.0
+    if logo_m is not None:
+        hl = min(h * 0.13, zone_w * 0.9 * logo_m.height / logo_m.width)
+    if logo_m is not None and detail:
+        l_marque, t_marque = [], 0.0
+        l_detail, t_detail = af._ajuster_titre(detail, reg, zone_w, dispo * 0.50, h * 0.09, max_lignes=3)
+    elif logo_m is not None:
+        l_marque, t_marque, l_detail, t_detail = [], 0.0, [], 0.0
+    elif detail:
         l_marque, t_marque = af._ajuster_titre(marque or " ", bold, zone_w, dispo * 0.45, h * 0.16, max_lignes=2)
         l_detail, t_detail = af._ajuster_titre(detail, reg, zone_w, dispo * 0.50, h * 0.09, max_lignes=3)
     else:
         l_marque, t_marque = af._ajuster_titre(marque or " ", bold, zone_w, dispo * 0.90, h * 0.16, max_lignes=3)
         l_detail, t_detail = [], 0.0
-    bloc_m, bloc_d = len(l_marque) * t_marque * 1.15, len(l_detail) * t_detail * 1.15
+    bloc_m, bloc_d = (hl if logo_m is not None else len(l_marque) * t_marque * 1.15), len(l_detail) * t_detail * 1.15
     ecart = h * 0.02 if l_detail else 0.0
     haut_groupe = libre_bas + (dispo + bloc_m + ecart + bloc_d) / 2  # groupe marque + détail centré dans l'espace libre
-    _lignes_centrees(c, l_marque, t_marque, bold, col_nom, cx, haut_groupe)
+    if logo_m is not None:
+        _logo_marque(c, logo_m, cx, haut_groupe - hl, hl)
+    else:
+        _lignes_centrees(c, l_marque, t_marque, bold, col_nom, cx, haut_groupe)
     if l_detail:
         _lignes_centrees(c, l_detail, t_detail, reg, col_nom, cx, haut_groupe - bloc_m - ecart)
     if pastille:  # en haut à gauche du visuel (la colonne de droite porte les textes)

@@ -393,7 +393,7 @@ def _reg(reglages, el):
 
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
                    image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None,
-                   identite=None):
+                   identite=None, logo_marque=None):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
     image : un visuel (image PIL) ou une liste de visuels (MAX_VISUELS au maximum), placés côte à côte sur une rangée.
@@ -401,6 +401,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     grand (texte principal à la place du prix), prix, prix_barre, ligne (texte sous le prix), pastille.
     Sans promo, c'est l'affiche « prix promo » d'origine (prix et prix_barre).
     Une page plus large que haute (est_paysage) est mise en page en paysage : visuel(s) à gauche, textes à droite.
+    logo_marque : logo de la marque (image PIL, de préférence RVBA), imprimé à la place du nom de la marque (le détail du
+    produit reste écrit) ; ignoré si la marque est vide.
     Retourne les cadres des éléments, normalisés (x0, y0, x1, y1) depuis le coin haut-gauche."""
     W, H = taille_page
     paysage = est_paysage(taille_page)
@@ -417,6 +419,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
     col_accent, col_sec = HexColor(st["couleur_accent"]), HexColor(st["couleur_secondaire"])
     marque, detail = (marque or "").strip(), (detail or "").strip()
+    if not marque:
+        logo_marque = None  # pas de marque : rien à remplacer par un logo
     if not marque and detail:
         marque, detail = detail, ""
     images = [im for im in (image if isinstance(image, (list, tuple)) else [image]) if im is not None][:MAX_VISUELS]
@@ -476,6 +480,10 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
             l_detail, t_detail = [], 0.0
         bloc_m = len(l_marque) * t_marque * 1.15
         bloc_d = len(l_detail) * t_detail * 1.15
+        if logo_marque is not None:  # le logo de la marque tient la place du nom : même zone, hauteur plus mesurée
+            l_marque, t_marque = [], 0.0
+            h_logo_marque = min(g * (0.09 if detail else 0.12), zone_w * 0.85 * logo_marque.height / logo_marque.width)
+            bloc_m = h_logo_marque
 
         # ---- Tailles des éléments (indépendantes de leur position)
         pied_h = g * 0.05
@@ -585,6 +593,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
                 buf.seek(0)
                 c.drawImage(ImageReader(buf), gauche + x_rel * s, bas, w_rel * s, gh * s)
             cadres["image"] = (gauche, bas, gauche + gw * s, bas + gh * s)
+
+    # ---- Logo de la marque (à la place du nom)
+    if logo_marque is not None:
+        dx, dy, sc = _reg(reglages, "marque")
+        hl = h_logo_marque * sc
+        wl = hl * logo_marque.width / logo_marque.height
+        cx = cx_t + dx * W
+        cy = (y_marque + bloc_m / 2) + dy * H
+        c.drawImage(ImageReader(logo_marque), cx - wl / 2, cy - hl / 2, wl, hl, mask="auto")
+        cadres["marque"] = (cx - wl / 2, cy - hl / 2, cx + wl / 2, cy + hl / 2)
 
     # ---- Marque puis détail
     for el, lignes, taille, bloc, y_bloc, police in (

@@ -9,6 +9,7 @@ Ce module ne dépend pas de Streamlit. Il contient aussi le relevé des couleurs
 d'image, sans intelligence artificielle) pour proposer des couleurs à la pharmacie.
 """
 import colorsys
+import io
 import json
 from pathlib import Path
 
@@ -18,7 +19,8 @@ import affiche as af
 
 FICHIER_STYLE = "style.json"
 FICHIER_PREFERENCES = "preferences.json"
-PREFERENCES_DEFAUT = {"faite": False, "nom": "", "format": "A5", "paysage": False, "majuscules": True, "logo": True}
+PREFERENCES_DEFAUT = {"faite": False, "nom": "", "format": "A5", "paysage": False, "majuscules": True, "logo": True,
+                      "aide_vue": False}  # aide_vue : « Premiers pas » déjà lus (le panneau ne s'affiche plus)
 
 # Ordres proposés (de haut en bas, sous le visuel)
 ORDRES = {
@@ -67,6 +69,7 @@ def charger(dossier: Path) -> dict:
             prefs["paysage"] = bool(lu.get("paysage", False))
             prefs["majuscules"] = bool(lu.get("majuscules", True))
             prefs["logo"] = bool(lu.get("logo", True))
+            prefs["aide_vue"] = bool(lu.get("aide_vue", False))
     except Exception:
         pass
     return prefs
@@ -75,6 +78,11 @@ def charger(dossier: Path) -> dict:
 def sauver(dossier: Path, prefs: dict) -> None:
     propre = {**PREFERENCES_DEFAUT, **{k: prefs[k] for k in PREFERENCES_DEFAUT if k in prefs}}
     (Path(dossier) / FICHIER_PREFERENCES).write_text(json.dumps(propre, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def marquer_aide_vue(dossier: Path) -> None:
+    """Les « Premiers pas » ont été lus : le panneau ne s'affichera plus (les autres préférences sont conservées)."""
+    sauver(dossier, {**charger(dossier), "aide_vue": True})
 
 
 # ----------------------------------------------------------------------------
@@ -86,6 +94,37 @@ def _hex(rgb) -> str:
 
 def _hsv(rgb):
     return colorsys.rgb_to_hsv(*(v / 255 for v in rgb))
+
+
+COTE_MAX_PDF = 1400  # pixels : taille de l'image tirée de la première page d'un PDF
+
+
+def ouvrir_visuel(octets: bytes) -> Image.Image:
+    """Image (PIL, RVB) d'un fichier PNG ou JPG, ou de la première page d'un PDF, pour en relever les couleurs.
+    ValueError, avec le message à afficher, si le fichier n'est pas lisible."""
+    if bytes(octets[:5]) == b"%PDF-":
+        try:
+            import pymupdf
+            doc = pymupdf.open(stream=bytes(octets), filetype="pdf")
+            if doc.needs_pass or doc.page_count < 1:
+                raise ValueError
+            page = doc[0]
+            zoom = min(2.0, COTE_MAX_PDF / max(page.rect.width, page.rect.height, 1))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        except Exception:
+            raise ValueError("PDF illisible (protégé par un mot de passe ou abîmé) : importer une image ou un autre PDF.")
+    try:
+        img = Image.open(io.BytesIO(bytes(octets)))
+        img.load()
+        if img.mode in ("RGBA", "LA", "P"):  # transparence : posée sur du blanc, comme sur une feuille
+            img = img.convert("RGBA")
+            fond = Image.new("RGBA", img.size, "white")
+            fond.alpha_composite(img)
+            img = fond
+        return img.convert("RGB")
+    except Exception:
+        raise ValueError("Fichier illisible : importer une image PNG ou JPG, ou un PDF.")
 
 
 def palette(image: Image.Image, n: int = 6) -> list:

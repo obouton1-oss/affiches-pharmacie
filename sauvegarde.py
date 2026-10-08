@@ -3,7 +3,8 @@
 Sur l'hébergement gratuit, les fichiers créés pendant l'utilisation disparaissent à chaque redémarrage.
 Si le réglage HF_TOKEN (secret ou variable d'environnement) est défini, l'outil recopie automatiquement ces fichiers dans un dépôt PRIVÉ de type
 « dataset » du compte Hugging Face (créé tout seul), puis les récupère au démarrage suivant.
-Sont sauvegardés : catalogue_appris.csv, catalogue.csv, style.json, preferences.json, logo_pharmacie.png et le dossier historique/ (affiches des 3 derniers mois).
+Sont sauvegardés : catalogue_appris.csv, catalogue.csv, style.json, preferences.json, types_affiche.json, logo_pharmacie.png,
+le dossier marques/ (logos de marques) et le dossier historique/ (affiches des 3 derniers mois).
 Mode plusieurs pharmacies (voir pharmacie.py) : chaque pharmacie a son propre dossier « pharmacies/<identifiant>/ » dans le dépôt,
 récupéré à sa première connexion ; la pharmacie d'origine (« racine ») garde les chemins d'avant.
 Variables facultatives : AFFICHES_DEPOT = « identifiant/nom-du-depot » pour choisir un autre dépôt, ou AFFICHES_NOM_DEPOT = « nom-du-depot »
@@ -16,8 +17,10 @@ import threading
 import pharmacie
 from chemins import DONNEES, reglage
 
-FICHIERS = ("catalogue_appris.csv", "catalogue.csv", "style.json", pharmacie.FICHIER_PREFERENCES, pharmacie.FICHIER_LOGO)
+FICHIERS = ("catalogue_appris.csv", "catalogue.csv", "style.json", pharmacie.FICHIER_PREFERENCES, pharmacie.FICHIER_LOGO,
+            "types_affiche.json")
 PREFIXE_HISTORIQUE = "historique/"
+PREFIXE_MARQUES = "marques/"  # logos de marques de la pharmacie (voir marques.py)
 DELAI_ENVOI = 6.0  # secondes : regroupe les modifications rapprochées en un seul envoi
 DELAI_ENVOI_MULTI = 30.0  # plusieurs pharmacies : un envoi commun toutes les 30 s au plus (Hugging Face limite le nombre d'envois par heure ; limite non publiée)
 statut = {"restaures": [], "erreur": ""}
@@ -57,7 +60,7 @@ def _nom_depot(api) -> str:
 
 
 def _nom_autorise(nom: str) -> bool:
-    return nom in FICHIERS or (nom.startswith(PREFIXE_HISTORIQUE) and ".." not in nom)
+    return nom in FICHIERS or (nom.startswith((PREFIXE_HISTORIQUE, PREFIXE_MARQUES)) and ".." not in nom)
 
 
 def restaurer(prefixe: str = "") -> None:
@@ -84,7 +87,8 @@ def restaurer(prefixe: str = "") -> None:
             pass  # fichier pas encore sauvegardé (première utilisation) : normal
     try:  # historique des affiches (plusieurs fichiers : téléchargement en parallèle)
         from huggingface_hub import snapshot_download
-        snapshot_download(repo_id=depot, repo_type="dataset", allow_patterns=[prefixe + PREFIXE_HISTORIQUE + "*"],
+        snapshot_download(repo_id=depot, repo_type="dataset",
+                          allow_patterns=[prefixe + PREFIXE_HISTORIQUE + "*", prefixe + PREFIXE_MARQUES + "*"],
                           local_dir=str(DONNEES), token=_config()["jeton"])
         statut["restaures"].append(prefixe + "historique")
     except Exception:
@@ -140,7 +144,8 @@ def planifier(nom: str) -> None:
 
 def supprimer(nom: str) -> None:
     """Demande la suppression du fichier dans la sauvegarde (dans quelques secondes)."""
-    if not activee() or not _nom_autorise(nom) or not (nom.startswith(PREFIXE_HISTORIQUE) or nom == pharmacie.FICHIER_LOGO):
+    if not activee() or not _nom_autorise(nom) or not (nom.startswith((PREFIXE_HISTORIQUE, PREFIXE_MARQUES))
+                                                       or nom == pharmacie.FICHIER_LOGO):
         return
     chemin = pharmacie.contexte().prefixe + nom
     with _verrou:

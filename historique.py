@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from PIL import Image
 
@@ -55,6 +56,8 @@ def identifiant(params: dict) -> str:
         cles["promo"] = params["promo"]  # un autre type de promotion = une autre affiche (les anciennes ne changent pas)
     if params.get("orientation"):
         cles["orientation"] = params["orientation"]  # paysage = une autre affiche que le portrait du même produit
+    if params.get("sans_photo"):
+        cles["sans_photo"] = True  # la version sans photo d'une affiche ne remplace pas la version avec photo
     texte = json.dumps(cles, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(texte.encode("utf-8")).hexdigest()[:12]
 
@@ -144,9 +147,11 @@ def visuel(ident: str):
     return _lire_visuel(_fichier_visuel(ident))
 
 
-def visuels(ident: str) -> list:
-    """Tous les visuels de l'affiche, dans l'ordre (liste vide s'il n'y en a pas)."""
-    images = [_lire_visuel(_fichier_visuel(ident, rang)) for rang in range(1, MAX_VISUELS + 1)]
+def visuels(ident: str, dossier=None) -> list:
+    """Tous les visuels de l'affiche, dans l'ordre (liste vide s'il n'y en a pas). dossier : dossier de la pharmacie, à
+    donner quand l'appel se fait hors de la session de l'utilisateur (par exemple au moment d'un téléchargement différé)."""
+    base = (Path(dossier) / "historique") if dossier is not None else _dossier()
+    images = [_lire_visuel(base / _nom_visuel(ident, rang)) for rang in range(1, MAX_VISUELS + 1)]
     return [img for img in images if img is not None]
 
 
