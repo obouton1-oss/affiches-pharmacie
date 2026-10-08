@@ -70,7 +70,10 @@ POLICES = ["Helvetica", "Montserrat", "Poppins", "Lato", "Open Sans", "Nunito", 
 _fichiers_police = {"Open Sans": "OpenSans", "Playfair Display": "PlayfairDisplay"}
 STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix": "#000000",
                 "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
-                "fond_prix": True, "couleur_fond_prix": "#FFD500"}
+                "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848"}
+# Cadre autour de l'affiche : en option seulement (aucun par défaut)
+CADRES = {"aucun": "Aucun cadre", "fin": "Trait fin", "epais": "Trait épais", "double": "Double trait",
+          "arrondi": "Coins arrondis", "pointille": "Pointillés", "coins": "Coins seulement"}
 THEMES = {
     "Impact (prix noir sur jaune)": {"couleur_nom": "#175848", "couleur_prix": "#000000",
                                      "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
@@ -384,6 +387,49 @@ def _disposition_auto(images, largeur_max, hauteur_max, ecart_rel=0.03):
     if aire_meilleure < aire_rangee * 1.12:  # à peu près équivalent : la rangée, comme sur l'affiche en portrait
         return rangee, gw_r, h_r
     return meilleur
+
+
+def _dessiner_cadre(c, W, H, S, cadre, couleur):
+    """Cadre autour de l'affiche, en retrait du bord (hors de la marge que les imprimantes n'impriment pas)."""
+    if cadre not in CADRES or cadre == "aucun":
+        return
+    retrait = S * 0.024
+    x0, y0, w, h = retrait, retrait, W - 2 * retrait, H - 2 * retrait
+    c.saveState()
+    c.setStrokeColor(couleur)
+    c.setLineJoin(0)
+    if cadre == "fin":
+        c.setLineWidth(max(0.8, S * 0.003))
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif cadre == "epais":
+        c.setLineWidth(S * 0.011)
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif cadre == "double":
+        c.setLineWidth(S * 0.006)
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+        e = S * 0.011
+        c.setLineWidth(max(0.6, S * 0.002))
+        c.rect(x0 + e, y0 + e, w - 2 * e, h - 2 * e, stroke=1, fill=0)
+    elif cadre == "arrondi":
+        c.setLineWidth(S * 0.007)
+        c.roundRect(x0, y0, w, h, S * 0.045, stroke=1, fill=0)
+    elif cadre == "pointille":
+        ep = S * 0.006
+        c.setLineWidth(ep)
+        c.setLineCap(1)
+        c.setDash(0.01, ep * 2.6)  # points ronds
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif cadre == "coins":
+        c.setLineWidth(S * 0.009)
+        c.setLineCap(0)
+        b = S * 0.12  # longueur de chaque branche
+        for (x, y, sx, sy) in ((x0, y0, 1, 1), (x0 + w, y0, -1, 1), (x0, y0 + h, 1, -1), (x0 + w, y0 + h, -1, -1)):
+            chemin = c.beginPath()
+            chemin.moveTo(x, y + sy * b)
+            chemin.lineTo(x, y)
+            chemin.lineTo(x + sx * b, y)
+            c.drawPath(chemin, stroke=1, fill=0)
+    c.restoreState()
 
 
 def _reg(reglages, el):
@@ -722,6 +768,11 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         h_cadre = h_logo if logo_img is not None else max(ts * 1.4, 1.0)
         cadres["logo"] = (x_g, cy - h_cadre / 2, x_g + gw, cy + h_cadre / 2)
 
+    try:
+        couleur_cadre = HexColor(st.get("couleur_cadre") or STYLE_DEFAUT["couleur_cadre"])
+    except Exception:
+        couleur_cadre = HexColor(STYLE_DEFAUT["couleur_cadre"])
+    _dessiner_cadre(c, W, H, S, st.get("cadre"), couleur_cadre)
     c.showPage()
     c.save()
     return {k: (x0 / W, 1 - y1 / H, x1 / W, 1 - y0 / H) for k, (x0, y0, x1, y1) in cadres.items()}

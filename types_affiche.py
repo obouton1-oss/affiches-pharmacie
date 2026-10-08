@@ -27,7 +27,7 @@ ID_DEFAUT = "standard"
 MAX_TYPES = 12
 LONGUEUR_NOM = 40
 CHAMPS = ("format", "paysage", "largeur_mm", "hauteur_mm", "logo", "majuscules", "photo", "style")
-_COULEURS = ("couleur_nom", "couleur_prix", "couleur_accent", "couleur_secondaire", "couleur_fond_prix")
+_COULEURS = ("couleur_nom", "couleur_prix", "couleur_accent", "couleur_secondaire", "couleur_fond_prix", "couleur_cadre")
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 PERSONNALISE = "Personnalisé"
 
@@ -47,6 +47,8 @@ def style_normalise(style) -> dict:
         valeur = str(res[cle])
         res[cle] = valeur.upper() if _HEX.match(valeur) else str(af.STYLE_DEFAUT[cle]).upper()
     res["fond_prix"] = bool(res["fond_prix"])
+    if res["cadre"] not in af.CADRES:
+        res["cadre"] = af.STYLE_DEFAUT["cadre"]
     if res["police"] not in af.POLICES:
         res["police"] = af.STYLE_DEFAUT["police"]
     ordre = style.get("ordre")

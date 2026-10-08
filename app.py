@@ -20,6 +20,7 @@ import catalogue
 import habillage
 import historique
 import images_produits as ip
+import logos_marques
 import marques
 import mise_en_route
 import planche
@@ -32,7 +33,7 @@ import pharmacie
 import preferences
 import types_affiche
 from chemins import EN_LIGNE
-from affiche import (ELEMENTS, FORMATS, MAX_VISUELS, POLICES, THEMES, apercu_png, disposition_a4, libelle_dates,
+from affiche import (CADRES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, THEMES, apercu_png, disposition_a4, libelle_dates,
                      orienter, parse_prix, pdf_impression, rendu, reglages_defaut)
 
 st.set_page_config(page_title="Affiches promo", page_icon="🏷️", layout="wide")
@@ -149,7 +150,7 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("w_majuscules", TYPE["majuscules"]), ("w_photo", TYPE["photo"]),
                     # logo de la marque (voir marques.py) et gestion des types d'affiche
                     ("w_logo_marque", True), ("cle_marque_vue", None), ("logo_marque_n", 0), ("derniere_collee_marque", None),
-                    ("televerse_marque_vu", None),
+                    ("televerse_marque_vu", None), ("logos_props", None), ("logos_lot", []),
                     ("type_suppr_attente", False), ("w_type", TYPE["id"]),
                     ("w_nettoyer", True), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
@@ -528,6 +529,39 @@ def raccourci_dates(nom):
     else:  # mois prochain
         debut = _fin_de_mois(auj) + timedelta(days=1)
     ss.w_debut, ss.w_fin = debut, _fin_de_mois(debut)
+
+
+def choisir_logo(marque, octets, depuis_lot=False):
+    cle_nouveau, message = marques.enregistrer(CTX.dossier, marque, octets)
+    if cle_nouveau is None:
+        ss.msg_ouvert = message
+        return
+    ss.msg_ouvert = message
+    ss.cle_marque_vue = None  # le nouveau logo est proposé d'office
+    ss.logo_marque_n += 1
+    if depuis_lot:
+        ss.logos_lot = [b for b in ss.logos_lot if b["cle"] != marques.cle(marque)]
+    elif ss.logos_props and ss.logos_props.get("cle") == marques.cle(marque):
+        ss.logos_props = None
+
+
+def afficher_propositions_logo(bloc, prefixe):
+    """Logos proposés pour une marque, chacun avec un bouton « Utiliser ce logo »."""
+    if not bloc["props"]:
+        st.warning(bloc["msg"] or "Aucun logo trouvé.")
+        st.link_button("Chercher sur Google Images",
+                       "https://www.google.com/search?tbm=isch&q=" + quote(bloc["marque"] + " logo"))
+        return
+    st.caption("Cliquer sur le logo à garder (il est enregistré pour toutes les affiches de la marque). "
+               "Les logos de Wikidata sont ceux déclarés officiellement pour la marque.")
+    cols = st.columns(4)
+    for i, p in enumerate(bloc["props"]):
+        with cols[i % 4]:
+            with st.container(border=True):
+                st.image(ip.vers_rgb_blanc(p["miniature"]), use_container_width=True)
+                st.caption(f"{p['source']} · {p['largeur']}×{p['hauteur']} px")
+                st.button("Utiliser ce logo", key=f"logo_{prefixe}_{bloc['cle']}_{i}", on_click=choisir_logo,
+                          args=(bloc["marque"], p["octets"], prefixe == "lot"), use_container_width=True)
 
 
 def nouvelle_affiche(garder_serie=False):
@@ -1177,8 +1211,19 @@ with col_form:
                                 help="Décocher pour écrire le nom de la marque en texte, comme d'habitude.")
                 if ss.w_logo_marque:
                     logo_marque_img, cle_logo = logo_connu, cle_marque
+            props_logo = ss.logos_props if (ss.logos_props or {}).get("cle") == marques.cle(marque) else None
             with st.expander("Logo de la marque : " + ("remplacer" if logo_connu is not None else "ajouter, pour l'imprimer "
-                                                                                              "à la place du nom")):
+                                                                                              "à la place du nom"),
+                             expanded=props_logo is not None):
+                if st.button(f"Chercher le logo de « {marque.strip()[:40]} »", icon=":material/search:",
+                             help="Cherche le vrai logo de la marque (Wikidata, Wikipédia, Commons, puis le web) ; "
+                                  "rien n'est enregistré avant votre choix."):
+                    with st.spinner("Recherche du logo…"):
+                        trouves, msg_l, _inc = logos_marques.chercher(marque)
+                    ss.logos_props = {"cle": marques.cle(marque), "marque": marque.strip(), "props": trouves, "msg": msg_l}
+                    st.rerun()
+                if props_logo is not None:
+                    afficher_propositions_logo(props_logo, "aff")
                 st.caption("Importer ou coller une fois le logo de la marque (SVR, Avène…) : l'outil le retrouve ensuite "
                            f"à chaque affiche « {_md(marque.strip())} ». Un logo sur fond transparent (PNG) est idéal ; "
                            "les marges blanches sont retirées automatiquement.")
@@ -1297,6 +1342,20 @@ with col_form:
                 cw = f"cp_{cle}_{ss.ver}"
                 colonne.color_picker(libelle, ss.style[cle], key=cw, on_change=maj_style, args=(cle, cw))
             st.caption("Les choix de police et de couleurs sont mémorisés pour les prochaines affiches.")
+
+        with st.expander("Cadre (en option)" + ("" if ss.style.get("cadre", "aucun") == "aucun"
+                                                 else f" : {CADRES.get(ss.style.get('cadre'), '')}")):
+            k1, k2 = st.columns([3, 2], vertical_alignment="bottom")
+            ckc = f"cadre_{ss.ver}"
+            k1.selectbox("Style du cadre", list(CADRES), format_func=CADRES.get, key=ckc,
+                         index=list(CADRES).index(ss.style.get("cadre")) if ss.style.get("cadre") in CADRES else 0,
+                         on_change=maj_style, args=("cadre", ckc))
+            ckk = f"cp_couleur_cadre_{ss.ver}"
+            k2.color_picker("Couleur du cadre", ss.style.get("couleur_cadre", "#175848"), key=ckk,
+                            on_change=maj_style, args=("couleur_cadre", ckk),
+                            disabled=ss.style.get("cadre", "aucun") == "aucun")
+            st.caption("Aucun cadre par défaut. Le cadre choisi reste appliqué aux affiches suivantes ; "
+                       "revenir à « Aucun cadre » pour l'enlever.")
 
         slot_reglages = st.container()  # « Réglages précis » (rempli quand l'aperçu est affiché)
 
@@ -1678,7 +1737,25 @@ if MULTI:
         st.divider()
         habillage.sous_titre("Logos de marques")
         st.caption("Le logo d'une marque (SVR, Avène…) est imprimé à la place de son nom sur les affiches de cette marque. "
-                   f"Pour en ajouter un : dans « {ONGLET_CREER} », sous le nom de la marque, « Logo de la marque ».")
+                   f"Pour en ajouter un : dans « {ONGLET_CREER} », sous le nom de la marque, « Logo de la marque », "
+                   "ou la recherche automatique ci-dessous.")
+        with st.expander("Chercher automatiquement les logos de plusieurs marques", expanded=bool(ss.logos_lot)):
+            liste = st.text_area("Marques (une par ligne, 10 au plus)", key="w_logos_liste", height=120,
+                                 placeholder="La Roche-Posay\nAvène\nGallia\nGuigoz\nGranions")
+            if st.button("Chercher les logos", icon=":material/search:", disabled=not liste.strip()):
+                noms = list(dict.fromkeys(n.strip() for n in liste.splitlines() if n.strip()))[:10]
+                barre = st.progress(0.0, text="Recherche des logos…")
+                lot = []
+                for j, n in enumerate(noms):
+                    barre.progress(j / len(noms), text=f"Recherche du logo « {n} »…")
+                    trouves, msg_l, _inc = logos_marques.chercher(n, web="si_besoin")
+                    lot.append({"cle": marques.cle(n), "marque": n, "props": trouves, "msg": msg_l})
+                ss.logos_lot = lot
+                st.rerun()
+            for bloc in ss.logos_lot:
+                st.markdown(f"**{_md(bloc['marque'])}**" + (" — logo déjà enregistré (le choix le remplace)"
+                                                             if marques.trouver(CTX.dossier, bloc["marque"]) else ""))
+                afficher_propositions_logo(bloc, "lot")
         logos = marques.lister(CTX.dossier)
         if not logos:
             st.caption("Aucun logo de marque pour l'instant.")
