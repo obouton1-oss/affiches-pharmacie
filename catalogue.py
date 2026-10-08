@@ -1,6 +1,6 @@
 """Catalogue interne des produits.
 
-Deux fichiers (dans le dossier de l'application) :
+Deux fichiers (dans le dossier de données de la pharmacie connectée : voir pharmacie.py) :
 - catalogue.csv          : export du logiciel de pharmacie (CIP/EAN + désignation, éventuellement marque).
                            Le fichier n'est jamais modifié par l'application.
 - catalogue_appris.csv   : produits enregistrés par l'application (code;nom;marque), mis à jour à chaque
@@ -14,14 +14,20 @@ import csv
 import unicodedata
 from pathlib import Path
 
-from chemins import DONNEES as DOSSIER
-FICHIER = DOSSIER / "catalogue.csv"
-FICHIER_APPRIS = DOSSIER / "catalogue_appris.csv"
+import pharmacie
 CLES_CODE = {"code", "cip", "cip13", "ean", "ean13", "gtin", "codeproduit", "codecip", "codeean"}
 CLES_NOM = {"nom", "designation", "libelle", "produit", "denomination", "nomproduit", "libelleproduit"}
 CLES_MARQUE = {"marque", "brand", "laboratoire", "fabricant"}
 MAX_LIGNES = 30000
-_cache = {"cle": None, "lignes": []}
+_caches = {}  # dossier de la pharmacie -> (clé des fichiers, lignes) : une entrée par pharmacie, remplacée d'un bloc
+
+
+def fichier() -> Path:
+    return pharmacie.contexte().dossier / "catalogue.csv"
+
+
+def fichier_appris() -> Path:
+    return pharmacie.contexte().dossier / "catalogue_appris.csv"
 
 
 def _sans_accents(s: str) -> str:
@@ -80,21 +86,23 @@ def _lire_fichier(fichier: Path) -> list[list[str]]:
 
 
 def _cle_fichiers():
-    return tuple(f.stat().st_mtime if f.exists() else None for f in (FICHIER, FICHIER_APPRIS))
+    return tuple(f.stat().st_mtime if f.exists() else None for f in (fichier(), fichier_appris()))
 
 
 def charger() -> list[list[str]]:
     """Retourne [[code, nom, marque], ...] (les produits appris remplacent ceux de l'export)."""
+    dossier = str(pharmacie.contexte().dossier)
     cle = _cle_fichiers()
-    if _cache["cle"] == cle:
-        return _cache["lignes"]
+    memo = _caches.get(dossier)
+    if memo and memo[0] == cle:
+        return memo[1]
     par_code = {}
-    for code, nom, marque in _lire_fichier(FICHIER):
+    for code, nom, marque in _lire_fichier(fichier()):
         par_code.setdefault(code, [code, nom, marque])
-    for code, nom, marque in _lire_fichier(FICHIER_APPRIS):
+    for code, nom, marque in _lire_fichier(fichier_appris()):
         par_code[code] = [code, nom, marque]
     lignes = list(par_code.values())[:MAX_LIGNES]
-    _cache.update(cle=cle, lignes=lignes)
+    _caches[dossier] = (cle, lignes)
     return lignes
 
 
@@ -140,27 +148,27 @@ def enregistrer(code: str, marque: str, detail: str) -> None:
     marque = (marque or "").strip()
     if not code or not nom:
         return
-    existants = {c: [c, n, m] for c, n, m in _lire_fichier(FICHIER_APPRIS)}
+    existants = {c: [c, n, m] for c, n, m in _lire_fichier(fichier_appris())}
     if existants.get(code) == [code, nom, marque]:
         return
     existants[code] = [code, nom, marque]
-    with open(FICHIER_APPRIS, "w", newline="", encoding="utf-8-sig") as f:
+    with open(fichier_appris(), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["code", "nom", "marque"])
         w.writerows(existants.values())
-    _cache["cle"] = None
+    _caches.pop(str(pharmacie.contexte().dossier), None)
 
 
 def importer(octets: bytes) -> tuple[int, str]:
     """Remplace catalogue.csv par un export fourni (CSV). Retourne (nombre de produits, message d'erreur)."""
-    temporaire = DOSSIER / "catalogue_import.tmp"
+    temporaire = pharmacie.contexte().dossier / "catalogue_import.tmp"
     try:
         temporaire.write_bytes(octets)
         lignes = _lire_fichier(temporaire)
         if not lignes:
             return 0, "Aucun produit reconnu : le fichier doit contenir une colonne de code (CIP/EAN) et une colonne de nom."
-        temporaire.replace(FICHIER)
-        _cache["cle"] = None
+        temporaire.replace(fichier())
+        _caches.pop(str(pharmacie.contexte().dossier), None)
         return len(lignes), ""
     except Exception as e:
         return 0, f"Fichier illisible ({type(e).__name__})."

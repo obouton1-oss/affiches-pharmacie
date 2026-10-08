@@ -8,6 +8,7 @@ rafraîchissement de l'écran ; rien n'est écrit sur le disque.
 """
 import hashlib
 import shutil
+import threading
 from collections import OrderedDict
 
 from PIL import Image, ImageDraw
@@ -19,13 +20,19 @@ COTE_MAX_IA = 1800  # côté maximal (pixels) de l'image soumise au détourage p
 MAX_MEMO = 12       # résultats gardés en mémoire (les plus récents)
 _session = {"obj": None, "essai": 0}
 _memo = OrderedDict()  # résultats déjà calculés dans ce processus (évite de recalculer à chaque rafraîchissement)
+_verrou_memo = threading.Lock()
+_verrou_session = threading.Lock()
+# Un seul calcul d'image lourd (détourage, netteté) à la fois : plusieurs pharmacies peuvent travailler en même temps
+# sans que la mémoire s'additionne (les autres attendent leur tour). Partagé avec nettete.py.
+VERROU_CALCUL = threading.Lock()
 
 
 def _memoriser(cle, valeur):
-    _memo[cle] = valeur
-    _memo.move_to_end(cle)
-    while len(_memo) > MAX_MEMO:
-        _memo.popitem(last=False)
+    with _verrou_memo:
+        _memo[cle] = valeur
+        _memo.move_to_end(cle)
+        while len(_memo) > MAX_MEMO:
+            _memo.popitem(last=False)
     return valeur
 
 
@@ -35,23 +42,24 @@ def vider_ancien_cache() -> None:
 
 
 def _rembg_session():
-    if _session["obj"] is not None or _session["essai"] >= 3:
+    with _verrou_session:  # une seule session du modèle, même si plusieurs pharmacies la demandent en même temps
+        if _session["obj"] is not None or _session["essai"] >= 3:
+            return _session["obj"]
+        _session["essai"] += 1  # une panne passagère (téléchargement du modèle…) ne bloque pas définitivement
+        try:
+            from rembg import new_session
+            try:  # options sobres en mémoire (utile sur les hébergements modestes)
+                import onnxruntime as ort
+                options = ort.SessionOptions()
+                options.enable_cpu_mem_arena = False
+                options.enable_mem_pattern = False
+                options.intra_op_num_threads = 2
+                _session["obj"] = new_session("u2net", sess_opts=options)
+            except TypeError:
+                _session["obj"] = new_session("u2net")
+        except Exception:
+            _session["obj"] = None
         return _session["obj"]
-    _session["essai"] += 1  # une panne passagère (téléchargement du modèle…) ne bloque pas définitivement
-    try:
-        from rembg import new_session
-        try:  # options sobres en mémoire (utile sur les hébergements modestes)
-            import onnxruntime as ort
-            options = ort.SessionOptions()
-            options.enable_cpu_mem_arena = False
-            options.enable_mem_pattern = False
-            options.intra_op_num_threads = 2
-            _session["obj"] = new_session("u2net", sess_opts=options)
-        except TypeError:
-            _session["obj"] = new_session("u2net")
-    except Exception:
-        _session["obj"] = None
-    return _session["obj"]
 
 
 def rembg_disponible() -> bool:
@@ -123,11 +131,17 @@ def nettoyer(img: Image.Image):
     """Retourne (image propre sur fond blanc, description de la méthode employée)."""
     img = img.convert("RGB")
     cle = hashlib.sha1(img.resize((128, 128)).tobytes() + str(img.size).encode()).hexdigest()[:16]
-    if cle in _memo:
-        _memo.move_to_end(cle)
-        return _memo[cle]
+    with _verrou_memo:
+        if cle in _memo:
+            _memo.move_to_end(cle)
+            return _memo[cle]
 
-    rgba = _detourage_ia(img)
+    with VERROU_CALCUL:
+        with _verrou_memo:  # une autre pharmacie vient peut-être de traiter la même image pendant l'attente
+            if cle in _memo:
+                _memo.move_to_end(cle)
+                return _memo[cle]
+        rgba = _detourage_ia(img)
     methode = "Détourage automatique (IA)"
     if rgba is None:
         rgba = _detourage_fond_uni(img)

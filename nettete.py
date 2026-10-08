@@ -9,6 +9,7 @@ Les derniers résultats sont gardés en mémoire (nombre limité) ; aucune image
 """
 import hashlib
 import shutil
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import requests
 from PIL import Image, ImageFilter
 
 from chemins import CODE, DONNEES
+from nettoyage import VERROU_CALCUL  # un seul calcul d'image lourd à la fois (voir nettoyage.py)
 
 DOSSIER_MODELES = CODE / "modeles"
 ANCIEN_DOSSIER = DONNEES / "images" / "nettete"  # ancien cache sur disque, supprimé au démarrage
@@ -28,6 +30,7 @@ MODELES = {
 }
 COTE_MAX = 1800   # taille maximale du résultat (pixels)
 _memo = OrderedDict()
+_verrou_memo = threading.Lock()
 
 
 def vider_ancien_cache() -> None:
@@ -75,18 +78,25 @@ def ameliorer(img: Image.Image, mode: str = "rapide"):
     """Retourne (image agrandie et affinée, description de la méthode)."""
     img = img.convert("RGB")
     cle = hashlib.sha1(img.resize((96, 96)).tobytes() + str(img.size).encode() + mode.encode()).hexdigest()[:16]
-    if cle in _memo:
-        _memo.move_to_end(cle)
-        return _memo[cle]
-    try:
-        res = _agrandir_ia(img, mode)
-        methode = "Netteté améliorée (IA, " + ("rapide" if mode == "rapide" else "haute qualité") + ")"
-    except Exception:
-        res = _agrandir_classique(img)
-        methode = "Netteté améliorée (agrandissement classique : modèle IA indisponible)"
+    with _verrou_memo:
+        if cle in _memo:
+            _memo.move_to_end(cle)
+            return _memo[cle]
+    with VERROU_CALCUL:
+        with _verrou_memo:  # une autre pharmacie vient peut-être de traiter la même image pendant l'attente
+            if cle in _memo:
+                _memo.move_to_end(cle)
+                return _memo[cle]
+        try:
+            res = _agrandir_ia(img, mode)
+            methode = "Netteté améliorée (IA, " + ("rapide" if mode == "rapide" else "haute qualité") + ")"
+        except Exception:
+            res = _agrandir_classique(img)
+            methode = "Netteté améliorée (agrandissement classique : modèle IA indisponible)"
     if max(res.size) > COTE_MAX:
         res.thumbnail((COTE_MAX, COTE_MAX), Image.LANCZOS)
-    _memo[cle] = (res, methode)
-    while len(_memo) > MAX_MEMO:
-        _memo.popitem(last=False)
+    with _verrou_memo:
+        _memo[cle] = (res, methode)
+        while len(_memo) > MAX_MEMO:
+            _memo.popitem(last=False)
     return res, methode

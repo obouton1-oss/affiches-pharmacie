@@ -19,40 +19,70 @@ import catalogue
 import habillage
 import historique
 import images_produits as ip
+import mise_en_route
 import planche
 import promos
 import sauvegarde
 import nettete
 import nettoyage
-from chemins import DONNEES, EN_LIGNE
+import pharmacie
+import preferences
+from chemins import EN_LIGNE
 from affiche import (ELEMENTS, FORMATS, MAX_VISUELS, POLICES, STYLE_DEFAUT, THEMES, apercu_png, disposition_a4,
-                     libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut)
+                     libelle_dates, orienter, ordre_valide, parse_prix, pdf_impression, rendu, reglages_defaut)
 
 st.set_page_config(page_title="Affiches promo", page_icon="🏷️", layout="wide")
 habillage.appliquer()  # feuille de style (aussi pour la page de mot de passe)
-acces.verifier_acces()  # version en ligne : mot de passe commun (sans effet si aucun mot de passe n'est défini)
+acces.verifier_acces()  # mot de passe commun (version en ligne) ou choix de la pharmacie + mot de passe (plusieurs pharmacies)
+
+MULTI = pharmacie.multi()  # plusieurs pharmacies : chaque session ne voit que les données de sa pharmacie
+EN_LIGNE = EN_LIGNE or MULTI
+CTX = pharmacie.contexte()
+IDENTITE = pharmacie.identite(CTX)  # nom et logo à dessiner sur les affiches ; None = pharmacie d'origine
 
 
 @st.cache_resource
 def _demarrage():
-    sauvegarde.restaurer()  # version en ligne : récupère le catalogue, le style et l'historique sauvegardés
-    historique.purger()  # supprime les affiches de plus de 3 mois (et leurs visuels)
+    if not MULTI:
+        sauvegarde.restaurer()  # version en ligne : récupère le catalogue, le style et l'historique sauvegardés
+        historique.purger()  # supprime les affiches de plus de 3 mois (et leurs visuels)
     nettoyage.vider_ancien_cache()  # anciennes versions : images nettoyées gardées sur le disque, inutiles
     nettete.vider_ancien_cache()
     return True
 
 
+@st.cache_resource
+def _demarrage_pharmacie(identifiant, prefixe):
+    """Une fois par pharmacie et par démarrage de l'application : récupère ses données sauvegardées, purge son historique."""
+    sauvegarde.restaurer(prefixe)
+    historique.purger()
+    return True
+
+
 _demarrage()
-habillage.entete("Affiches promo", "Pharmacie Bouton")
+if MULTI:
+    _demarrage_pharmacie(CTX.id, CTX.prefixe)
+habillage.entete("Affiches promo", pharmacie.nom_affiche(CTX))
+
+# habitudes de la pharmacie (format, orientation…) et style de ses affiches ; à la première connexion d'une nouvelle
+# pharmacie, les questions de mise en route remplacent l'outil (la pharmacie d'origine n'est pas concernée)
+PREFS = preferences.charger(CTX.dossier)
+if "style" not in st.session_state:
+    st.session_state.style = preferences.charger_style(CTX.dossier)
+if MULTI and not PREFS["faite"] and CTX.prefixe != "":
+    mise_en_route.afficher(CTX, premiere_fois=True)  # s'arrête ici (st.stop) tant que la mise en route n'est pas faite
 
 ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE = "Créer une affiche", "Historique", "Page A4 regroupée"
+ONGLET_PHARMACIE = "Ma pharmacie"
+_noms_onglets = [ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE] + ([ONGLET_PHARMACIE] if MULTI else [])
 try:  # versions récentes de Streamlit : l'onglet affiché peut être changé par l'application
-    onglet_creer, onglet_hist, onglet_page = st.tabs([ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE],
-                                                     key="onglet", on_change="rerun")
+    _onglets = st.tabs(_noms_onglets, key="onglet", on_change="rerun")
     ONGLETS_PILOTABLES = True
 except TypeError:
-    onglet_creer, onglet_hist, onglet_page = st.tabs([ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE])
+    _onglets = st.tabs(_noms_onglets)
     ONGLETS_PILOTABLES = False
+onglet_creer, onglet_hist, onglet_page = _onglets[:3]
+onglet_pharmacie = _onglets[3] if MULTI else None
 
 recherche_produit = components.declare_component(
     "recherche_produit", path=str(Path(__file__).parent / "composant_recherche"))
@@ -70,11 +100,12 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("regroupe", []), ("suppr_attente", None), ("msg_hist", ""), ("planche_cache", None),
                     # valeurs de départ des champs du formulaire (modifiables aussi par « Rouvrir » dans l'historique)
                     ("w_prix", ""), ("w_barre_on", False), ("w_barre", ""), ("w_dates_on", False),
-                    ("w_debut", date.today()), ("w_fin", date.today()), ("w_format", "A5"),
-                    ("w_paysage", False), ("w_lg", 100), ("w_ht", 150), ("w_logo", True), ("w_majuscules", True),
+                    ("w_debut", date.today()), ("w_fin", date.today()), ("w_format", PREFS["format"]),
+                    ("w_paysage", PREFS["paysage"]), ("w_lg", 100), ("w_ht", 150), ("w_logo", PREFS["logo"]),
+                    ("w_majuscules", PREFS["majuscules"]),
                     ("w_nettoyer", True), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
-                    ("orientation_page", planche.PORTRAIT),
+                    ("orientation_page", planche.PORTRAIT), ("logo_n", 0),
                     ("filtre_hist", ""),
                     # plusieurs visuels (gamme) et « Nouvelle affiche »
                     ("extras", []), ("extra_uid", 0), ("extra_n", 0), ("ajout_extra", False), ("cand_extra", None),
@@ -95,28 +126,16 @@ if ss.reglages is None:
 for _el, _reglage in reglages_defaut().items():  # éléments ajoutés depuis (texte sous le prix, pastille)
     ss.reglages.setdefault(_el, _reglage)
 
-FICHIER_STYLE = DONNEES / "style.json"
 SEUIL_NETTETE = 700  # en dessous (côté le plus court, en pixels), la netteté peut être améliorée
 
 
 def charger_style():
-    st_ = dict(STYLE_DEFAUT)
-    try:
-        sauve = json.loads(FICHIER_STYLE.read_text(encoding="utf-8"))
-        if "fond_prix" in sauve:  # les anciens fichiers (sans bandeau de prix) reprennent le nouveau style par défaut
-            st_.update({k: v for k, v in sauve.items() if k in st_})
-        elif sauve.get("police") in POLICES:
-            st_["police"] = sauve["police"]
-    except Exception:
-        pass
-    if st_["police"] not in POLICES:
-        st_["police"] = STYLE_DEFAUT["police"]
-    return st_
+    return preferences.charger_style(CTX.dossier)  # le style (police, couleurs, ordre) est propre à chaque pharmacie
 
 
 def sauver_style():
     try:
-        FICHIER_STYLE.write_text(json.dumps(ss.style, ensure_ascii=False, indent=1), encoding="utf-8")
+        preferences.sauver_style(CTX.dossier, ss.style)
         sauvegarde.planifier("style.json")
     except Exception:
         pass
@@ -289,6 +308,9 @@ def rouvrir(ident):
             ss.reglages[el].update({k: float(v) for k, v in g.items() if k in ("dx", "dy", "s")})
     ss.style = dict(STYLE_DEFAUT)
     ss.style.update({k: v for k, v in (e.get("style") or {}).items() if k in STYLE_DEFAUT})
+    ordre_stocke = (e.get("style") or {}).get("ordre")
+    if ordre_stocke and ordre_valide(ordre_stocke) == tuple(ordre_stocke):  # affiche faite avec un autre ordre des éléments
+        ss.style["ordre"] = list(ordre_stocke)
     if ss.style["police"] not in POLICES:
         ss.style["police"] = STYLE_DEFAUT["police"]
     ss.w_police = ss.style["police"]
@@ -888,7 +910,8 @@ with col_form:
                                        "quand on change d'orientation.")
             taille = orienter(FORMATS[choix], paysage)
         format_txt = f"{choix} paysage" if paysage else choix
-        logo = st.checkbox("Afficher le logo", key="w_logo")
+        logo = st.checkbox("Afficher le logo" if (IDENTITE is None or IDENTITE["logo"]) else "Afficher le nom de la pharmacie",
+                           key="w_logo")
 
         with st.expander("Police et couleurs"):
             st.selectbox("Police", POLICES, key="w_police",
@@ -938,9 +961,9 @@ with col_form:
                 sauvegarde.planifier("catalogue.csv")
                 ss.msg_import = f"{nb} produit(s) importé(s)."
                 st.rerun()
-        if catalogue.FICHIER_APPRIS.exists():
+        if catalogue.fichier_appris().exists():
             st.download_button("Télécharger les produits mémorisés (copie de sauvegarde)",
-                               catalogue.FICHIER_APPRIS.read_bytes(), "catalogue_appris.csv", "text/csv")
+                               catalogue.fichier_appris().read_bytes(), "catalogue_appris.csv", "text/csv")
         if sauvegarde.activee():
             if sauvegarde.statut["erreur"]:
                 st.warning(sauvegarde.statut["erreur"])
@@ -978,7 +1001,8 @@ with col_apercu:
                 st.warning("Aucun visuel : l'affiche sera générée sans image.")
             dates_txt = libelle_dates(debut, fin) if avec_dates else ""
             unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, [visuel] + autres_visuels, logo,
-                                     reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo)
+                                     reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo,
+                                     identite=IDENTITE)
             largeur_px = 900
             png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
             ev = editeur_affiche(image="data:image/png;base64," + base64.b64encode(png).decode(),
@@ -1185,7 +1209,8 @@ with onglet_page:
 
             titre_page = ss.titre_page.strip()
             cle = (titre_page, tuple(e["id"] for e in choisies), tuple(e["cree"] for e in choisies),
-                   json.dumps(ss.style, sort_keys=True), bool(ss.w_logo_page), ss.orientation_page)
+                   json.dumps(ss.style, sort_keys=True), bool(ss.w_logo_page), ss.orientation_page,
+                   pharmacie.empreinte_identite(CTX))
             if ss.planche_cache is None or ss.planche_cache[0] != cle:
                 groupes, debut_lot = [], 0
                 for taille_lot in tailles:
@@ -1194,7 +1219,7 @@ with onglet_page:
                     debut_lot += taille_lot
                 with st.spinner("Mise en page…"):
                     pdf_page = planche.pdf_planche(titre_page, groupes, ss.style, bool(ss.w_logo_page),
-                                                   ss.orientation_page)
+                                                   ss.orientation_page, IDENTITE)
                     ss.planche_cache = (cle, pdf_page, planche.apercus_png(pdf_page, 80))
             _, pdf_page, apercus = ss.planche_cache
             nom_fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", titre_page)[:40].strip("_") or "page"
@@ -1203,3 +1228,50 @@ with onglet_page:
     with col_d:
         for i, png_page in enumerate(apercus):
             st.image(png_page, caption=f"Feuille {i + 1} sur {len(apercus)}", use_container_width=True)
+
+
+# ----------------------------------------------------------------------------
+# Onglet « Ma pharmacie » (plusieurs pharmacies) : logo, déconnexion et, pour l'administrateur, ajout de pharmacies
+# ----------------------------------------------------------------------------
+def _se_deconnecter():
+    pharmacie.fermer_session()
+
+
+if MULTI:
+    with onglet_pharmacie:
+        st.subheader(pharmacie.nom_affiche(CTX))
+        st.caption("Chaque pharmacie a ses propres affiches, son catalogue, ses couleurs et son logo : "
+                   "aucune autre pharmacie n'y a accès.")
+        mise_en_route.afficher(CTX, premiere_fois=False)
+        st.divider()
+        st.button("Se déconnecter", on_click=_se_deconnecter)
+
+        if CTX.admin:
+            st.divider()
+            habillage.sous_titre("Administration : ajouter une pharmacie ou changer un mot de passe")
+            config = pharmacie.configuration()
+            st.caption("Cet outil ne garde jamais les mots de passe eux-mêmes, seulement leur empreinte chiffrée. "
+                       "Le bloc produit ci-dessous est à coller à la fin des secrets de l'application ; "
+                       "l'application redémarre alors et déconnecte tout le monde : à faire hors des heures de pointe.")
+            existante = st.selectbox("Pharmacie", [None] + list(config), key="adm_choix",
+                                     format_func=lambda i: "Nouvelle pharmacie" if i is None else config[i]["nom"])
+            if existante is None:
+                nom_adm = st.text_input("Nom de la nouvelle pharmacie", key="adm_nom")
+            else:
+                nom_adm = config[existante]["nom"]
+            if st.button("Préparer la fiche", disabled=not nom_adm.strip()):
+                ident = existante or pharmacie.identifiant_depuis_nom(nom_adm, config)
+                mdp = pharmacie.mot_de_passe_provisoire()
+                ss.adm_fiche = {"ident": ident, "nom": nom_adm.strip(), "mdp": mdp,
+                                "bloc": pharmacie.fiche_secrets(
+                                    ident, nom_adm, mdp, racine=bool(existante and config[existante]["racine"]),
+                                    admin=bool(existante and config[existante]["admin"]))}
+            fiche = ss.get("adm_fiche")
+            if fiche:
+                st.write(f"**{fiche['nom']}** (identifiant « {fiche['ident']} »). Mot de passe à communiquer à la "
+                         "pharmacie (affiché une seule fois ici) :")
+                st.code(fiche["mdp"], language=None)
+                st.write("À coller à la fin des secrets :" if fiche["ident"] not in config else
+                         "À mettre à la place de l'ancien bloc de cette pharmacie dans les secrets :")
+                st.code(fiche["bloc"], language="toml")
+                st.button("Effacer ce mot de passe de l'écran", on_click=lambda: ss.pop("adm_fiche", None))

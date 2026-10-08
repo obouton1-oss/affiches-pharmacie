@@ -6,6 +6,7 @@ Au-delà de 6 affiches, plusieurs feuilles sont produites, avec des vignettes r�
 """
 import io
 from decimal import Decimal
+from pathlib import Path
 
 from reportlab.lib.colors import HexColor, white
 from reportlab.lib.pagesizes import A4
@@ -233,23 +234,37 @@ def _pastille(c, texte, cx, cy, rayon, st, bold, fond):
                  couleur_prix if fond else white)
 
 
-def _pied_de_page(c, largeur_page, y, hauteur, st, bold):
-    if not af.LOGO.exists():
+def _identite(identite):
+    """(nom, chemin du logo ou None) à imprimer en pied de page ; identite None = pharmacie d'origine."""
+    if identite is None:
+        return "Pharmacie Bouton", (af.LOGO if af.LOGO.exists() else None)
+    chemin = identite.get("logo")
+    return str(identite.get("nom") or "").strip(), (chemin if chemin and Path(chemin).exists() else None)
+
+
+def _pied_de_page(c, largeur_page, y, hauteur, st, bold, identite=None):
+    nom, chemin = _identite(identite)
+    logo = ImageReader(str(chemin)) if chemin else None
+    if logo is None and not nom:
         return
-    logo = ImageReader(str(af.LOGO))
-    lw, lh = logo.getSize()
-    w_logo = hauteur * lw / lh
+    lw, lh = logo.getSize() if logo else (1, 1)
+    w_logo = hauteur * lw / lh if logo else 0.0
     ts = hauteur * 0.36
-    ecart = largeur_page * 0.012
-    tw = stringWidth("Pharmacie Bouton", bold, ts)
+    ecart = largeur_page * 0.012 if logo else 0.0
+    tw = stringWidth(nom, bold, ts)
+    largeur_max = largeur_page * 0.9
+    if w_logo + ecart + tw > largeur_max:  # nom très long : le tout se réduit pour tenir dans la page
+        f = largeur_max / (w_logo + ecart + tw)
+        w_logo, ts, ecart, tw, hauteur = w_logo * f, ts * f, ecart * f, tw * f, hauteur * f
     x_g = (largeur_page - (w_logo + ecart + tw)) / 2
-    c.drawImage(logo, x_g, y, w_logo, hauteur, mask="auto")
+    if logo:
+        c.drawImage(logo, x_g, y, w_logo, hauteur, mask="auto")
     c.setFillColor(af.VERT)
     c.setFont(bold, ts)
-    c.drawString(x_g + w_logo + ecart, y + hauteur / 2 - ts * 0.3, "Pharmacie Bouton")
+    c.drawString(x_g + w_logo + ecart, y + hauteur / 2 - ts * 0.3, nom)
 
 
-def construire_planche(sortie, titre, groupes, style=None, afficher_logo=True, orientation=PORTRAIT):
+def construire_planche(sortie, titre, groupes, style=None, afficher_logo=True, orientation=PORTRAIT, identite=None):
     """sortie : chemin ou objet binaire. groupes : une liste d'entrées de l'historique par feuille A4
     (6 au maximum chacune, avec la clé « _images » : liste des visuels de l'affiche). Le titre est repris sur chaque feuille.
     orientation : « Portrait » ou « Paysage »."""
@@ -280,9 +295,9 @@ def construire_planche(sortie, titre, groupes, style=None, afficher_logo=True, o
             c.line(W / 2 - 30 * mm, y_filet, W / 2 + 30 * mm, y_filet)
             haut_contenu = y_filet - (5 if paysage else 7) * mm
         bas_contenu = 8 * mm
-        if afficher_logo and af.LOGO.exists():
+        if afficher_logo and (identite is not None or af.LOGO.exists()):
             h_logo = (8 if paysage else 9) * mm
-            _pied_de_page(c, W, 7 * mm, h_logo, st, bold)
+            _pied_de_page(c, W, 7 * mm, h_logo, st, bold, identite)
             bas_contenu = 7 * mm + h_logo + 4 * mm
 
         n = len(entrees)
@@ -301,9 +316,9 @@ def construire_planche(sortie, titre, groupes, style=None, afficher_logo=True, o
     c.save()
 
 
-def pdf_planche(titre, groupes, style=None, afficher_logo=True, orientation=PORTRAIT) -> bytes:
+def pdf_planche(titre, groupes, style=None, afficher_logo=True, orientation=PORTRAIT, identite=None) -> bytes:
     tampon = io.BytesIO()
-    construire_planche(tampon, titre, groupes, style, afficher_logo, orientation)
+    construire_planche(tampon, titre, groupes, style, afficher_logo, orientation, identite)
     return tampon.getvalue()
 
 

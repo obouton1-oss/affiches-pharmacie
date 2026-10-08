@@ -46,6 +46,21 @@ def orienter(taille_page, paysage: bool):
 
 ELEMENTS = {"image": "Visuel", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
             "prix": "Prix", "ligne": "Texte sous le prix", "pastille": "Pastille", "dates": "Dates", "logo": "Logo"}
+# Ordre des textes sous le visuel, de haut en bas (réglage « ordre » du style ; le texte sous le prix suit toujours le prix)
+ORDRE_DEFAUT = ("marque", "detail", "prix_barre", "prix", "dates")
+LIBELLES_ORDRE = {"marque": "Marque", "detail": "Produit (détail)", "prix_barre": "Prix barré", "prix": "Prix promo",
+                  "dates": "Dates"}
+
+
+def ordre_valide(ordre) -> tuple:
+    """L'ordre demandé s'il contient exactement les cinq éléments (dans un ordre quelconque), sinon l'ordre habituel."""
+    try:
+        ordre = tuple(ordre)
+    except TypeError:
+        return ORDRE_DEFAUT
+    return ordre if sorted(ordre) == sorted(ORDRE_DEFAUT) else ORDRE_DEFAUT
+
+
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
         "août", "septembre", "octobre", "novembre", "décembre"]
 GRAS, NORMAL = "Helvetica-Bold", "Helvetica"
@@ -377,7 +392,8 @@ def _reg(reglages, el):
 
 
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
-                   image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None):
+                   image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None,
+                   identite=None):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
     image : un visuel (image PIL) ou une liste de visuels (MAX_VISUELS au maximum), placés côte à côte sur une rangée.
@@ -435,8 +451,13 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     texte_marque = marque or " "
     if majuscules:
         texte_marque = texte_marque.upper()
-    logo_img = ImageReader(str(LOGO)) if (afficher_logo and LOGO.exists()) else None
+    # identité de la pharmacie : None = pharmacie d'origine (logo.png et « Pharmacie Bouton »)
+    nom_pharmacie, chemin_logo = ("Pharmacie Bouton", LOGO) if identite is None else (
+        str(identite.get("nom") or "").strip(), identite.get("logo"))
+    logo_img = ImageReader(str(chemin_logo)) if (afficher_logo and chemin_logo and Path(chemin_logo).exists()) else None
+    nom_seul = bool(afficher_logo and logo_img is None and nom_pharmacie)  # sans logo importé : le nom seul en pied de page
     fond = bool(st.get("fond_prix"))
+    ordre = ordre_valide(st.get("ordre"))
     pad_x, pad_b, pad_h = 0.20, 0.12, 0.16  # marges du bandeau, en fraction du corps du prix
 
     k = 1.0  # facteur de réduction des textes : en paysage, ils sont réduits jusqu'à tenir dans la hauteur
@@ -456,27 +477,23 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         bloc_m = len(l_marque) * t_marque * 1.15
         bloc_d = len(l_detail) * t_detail * 1.15
 
-        # ---- Positions automatiques (de bas en haut) : logo, dates, prix, prix barré, détail, marque, visuel
+        # ---- Tailles des éléments (indépendantes de leur position)
         pied_h = g * 0.05
         y_pied = y_bas_img if paysage else g * 0.03  # en portrait, le logo est collé plus bas que les marges
         cy_logo = y_pied + pied_h / 2
-        y = y_pied + pied_h + g * 0.015
 
-        y_dates = y
         taille_d = 0.0
         if texte_dates:
             taille_d = g * 0.022
             while stringWidth(texte_dates, reg, taille_d) > zone_w and taille_d > 6:
                 taille_d -= 0.5
-            y += taille_d + g * 0.022
 
-        # texte sous le prix (calcul de la promotion, précision) : juste au-dessus des dates
-        y_ligne, bloc_l, l_ligne, t_ligne = y, 0.0, [], 0.0
+        # texte sous le prix (calcul de la promotion, précision) : juste sous le prix
+        bloc_l, l_ligne, t_ligne = 0.0, [], 0.0
         if texte_ligne:
             l_ligne, t_ligne = _ajuster_titre(texte_ligne, reg, zone_w, g * 0.10, g * 0.028, max_lignes=3,
                                               equilibre=paysage)
             bloc_l = len(l_ligne) * t_ligne * 1.15
-            y += bloc_l + g * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
 
         taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
         while True:
@@ -484,27 +501,47 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
             if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
                 break
             taille_p -= 1
-        y_prix = y + (taille_p * pad_b if fond else 0)
-        y = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0) + g * 0.02
+        taille_b = taille_p * (0.25 if fond else 0.30) if prix_barre is not None else 0.0
 
-        taille_b = 0.0
-        y_barre = y
-        if prix_barre is not None:
-            taille_b = taille_p * (0.25 if fond else 0.30)
-            y_barre = y + taille_b * 0.3  # place sous le texte pour le bout du trait diagonal
-            y = y_barre + taille_b * 0.95 + g * 0.015
-
-        y_detail = y + g * 0.005
-        if detail:
-            y = y_detail + bloc_d + g * 0.012
-        y_marque = y
-        y = y_marque + bloc_m + g * 0.018
-        if not paysage or y_marque + bloc_m <= y_haut or k <= 0.3:
+        # ---- Positions automatiques, de bas en haut : logo, puis les éléments dans l'ordre choisi (par défaut : dates,
+        # prix, prix barré, détail, marque), puis le visuel dans la place restante
+        y = y_pied + pied_h + g * 0.015
+        y_dates = y_ligne = y_prix = y_barre = y_detail = y_marque = y
+        sommet = y  # haut de l'élément le plus haut
+        for nom in reversed(ordre):
+            if nom == "dates":
+                y_dates = y
+                if texte_dates:
+                    y += taille_d + g * 0.022
+                    sommet = y_dates + taille_d
+            elif nom == "prix":
+                y_ligne = y
+                if texte_ligne:
+                    y += bloc_l + g * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
+                y_prix = y + (taille_p * pad_b if fond else 0)
+                sommet = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0)  # haut du bandeau
+                y = sommet + g * 0.02
+            elif nom == "prix_barre":
+                y_barre = y
+                if prix_barre is not None:
+                    y_barre = y + taille_b * 0.3  # place sous le texte pour le bout du trait diagonal
+                    y = y_barre + taille_b * 0.95 + g * 0.015
+                    sommet = y_barre + taille_b * 0.95
+            elif nom == "detail":
+                y_detail = y + g * 0.005
+                if detail:
+                    y = y_detail + bloc_d + g * 0.012
+                    sommet = y_detail + bloc_d
+            elif nom == "marque":
+                y_marque = y
+                y = y_marque + bloc_m + g * 0.018
+                sommet = y_marque + bloc_m
+        if not paysage or sommet <= y_haut or k <= 0.3:
             break
         k *= 0.96  # en paysage : le bloc de textes dépasse en hauteur, on le réduit un peu et on recommence
 
     if paysage:  # bloc de textes centré en hauteur entre le logo et le haut de la page
-        decalage = max(0.0, y_haut - (y_marque + bloc_m)) / 2
+        decalage = max(0.0, y_haut - sommet) / 2
         y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque = (
             v + decalage for v in (y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque))
         y_image_bas, y_image_haut = y_bas_img, y_haut_img
@@ -644,26 +681,28 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["dates"] = (cx - wt / 2, base - t * 0.2, cx + wt / 2, base + t * 0.8)
 
     # ---- Logo + nom de la pharmacie
-    if logo_img is not None:
+    if logo_img is not None or nom_seul:
         dx, dy, s = _reg(reglages, "logo")
-        lw, lh = logo_img.getSize()
+        lw, lh = logo_img.getSize() if logo_img is not None else (1, 1)
         h_logo = pied_h * s
-        w_logo = h_logo * lw / lh
+        w_logo = h_logo * lw / lh if logo_img is not None else 0.0
         ts = g * 0.017 * s
-        ecart = S * 0.015 * s
-        tw = stringWidth("Pharmacie Bouton", bold, ts)
+        ecart = S * 0.015 * s if logo_img is not None else 0.0
+        tw = stringWidth(nom_pharmacie, bold, ts)
         gw = w_logo + ecart + tw
-        if paysage and gw > zone_w:  # colonne étroite : le logo et le nom se réduisent pour y tenir
+        if (paysage or identite is not None) and gw > zone_w:  # colonne étroite ou nom long : le logo et le nom se réduisent pour y tenir
             f = zone_w / gw
             h_logo, w_logo, ts, ecart, tw, gw = h_logo * f, w_logo * f, ts * f, ecart * f, tw * f, gw * f
         cx = cx_t + dx * W
         cy = cy_logo + dy * H
         x_g = cx - gw / 2
-        c.drawImage(logo_img, x_g, cy - h_logo / 2, w_logo, h_logo, mask="auto")
+        if logo_img is not None:
+            c.drawImage(logo_img, x_g, cy - h_logo / 2, w_logo, h_logo, mask="auto")
         c.setFillColor(VERT)
         c.setFont(bold, ts)
-        c.drawString(x_g + w_logo + ecart, cy - ts * 0.3, "Pharmacie Bouton")
-        cadres["logo"] = (x_g, cy - h_logo / 2, x_g + gw, cy + h_logo / 2)
+        c.drawString(x_g + w_logo + ecart, cy - ts * 0.3, nom_pharmacie)
+        h_cadre = h_logo if logo_img is not None else max(ts * 1.4, 1.0)
+        cadres["logo"] = (x_g, cy - h_cadre / 2, x_g + gw, cy + h_cadre / 2)
 
     c.showPage()
     c.save()

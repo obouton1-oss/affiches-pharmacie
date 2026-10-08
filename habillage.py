@@ -42,9 +42,9 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 
 /* Aperçu : colonne qui reste visible pendant la saisie */
 @media (min-width:700px){
-  [data-testid="stColumn"]:has(.st-key-apercu_fixe){position:sticky;top:4.2rem;align-self:flex-start}
+  [data-testid="stColumn"]:has(.st-key-apercu_fixe),[data-testid="stColumn"]:has(.st-key-mer_apercu){position:sticky;top:4.2rem;align-self:flex-start}
 }
-.st-key-apercu_fixe{background:#fff;border:1px solid var(--bord-doux);border-radius:var(--rayon);
+.st-key-apercu_fixe,.st-key-mer_apercu{background:#fff;border:1px solid var(--bord-doux);border-radius:var(--rayon);
   padding:.9rem 1rem 1rem;box-shadow:0 2px 10px rgba(16,24,40,.07);gap:.6rem;
   max-height:calc(100vh - 5rem);overflow-y:auto}
 .hab-vide{border:2px dashed var(--bord);border-radius:12px;padding:2.2rem 1.4rem;text-align:center;color:var(--muet);
@@ -69,7 +69,7 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 .st-key-zone_affiner [data-testid="stForm"]{max-width:none;background:transparent;border:none;padding:0}
 
 @media (max-width:699px){
-  .st-key-apercu_fixe{max-height:none;overflow-y:visible}
+  .st-key-apercu_fixe,.st-key-mer_apercu{max-height:none;overflow-y:visible}
 }
 </style>
 """

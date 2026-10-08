@@ -20,18 +20,22 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 import sauvegarde
-from chemins import DONNEES
+import pharmacie
 
-DOSSIER = DONNEES / "historique"
 DUREE_JOURS = 90  # environ 3 mois
 MAX_VISUELS = 4  # visuels par affiche (même valeur que affiche.MAX_VISUELS)
 COTE_MAX_VISUEL = 2000  # pixels
 LARGEUR_MINIATURE = 360  # pixels
-_cache = {"signature": None, "entrees": []}
+_caches = {}  # dossier de la pharmacie -> (signature des fichiers, entrées) : une entrée par pharmacie, remplacée d'un bloc
+
+
+def _dossier():
+    """Dossier de l'historique de la pharmacie connectée."""
+    return pharmacie.contexte().dossier / "historique"
 
 
 def _fichier_json(identifiant: str):
-    return DOSSIER / f"{identifiant}.json"
+    return _dossier() / f"{identifiant}.json"
 
 
 def _nom_visuel(identifiant: str, rang: int = 1) -> str:
@@ -40,7 +44,7 @@ def _nom_visuel(identifiant: str, rang: int = 1) -> str:
 
 
 def _fichier_visuel(identifiant: str, rang: int = 1):
-    return DOSSIER / _nom_visuel(identifiant, rang)
+    return _dossier() / _nom_visuel(identifiant, rang)
 
 
 def identifiant(params: dict) -> str:
@@ -73,7 +77,7 @@ def enregistrer(params: dict, visuel, apercu_png: bytes, supplementaires=()) -> 
     """Enregistre (ou met à jour) une affiche. `params` : produit, prix, dates, format, style, positions…
     `visuel` : image PIL (ou None). `supplementaires` : autres visuels de l'affiche (gamme), dans l'ordre.
     `apercu_png` : aperçu de l'affiche. Retourne l'identifiant."""
-    DOSSIER.mkdir(parents=True, exist_ok=True)
+    _dossier().mkdir(parents=True, exist_ok=True)
     ident = identifiant(params)
     images = [v for v in (visuel, *supplementaires) if v is not None][:MAX_VISUELS]
     entree = dict(params)
@@ -99,12 +103,14 @@ def enregistrer(params: dict, visuel, apercu_png: bytes, supplementaires=()) -> 
 
 def lister() -> list[dict]:
     """Toutes les affiches enregistrées, les plus récentes d'abord."""
-    if not DOSSIER.exists():
+    dossier = _dossier()
+    if not dossier.exists():
         return []
-    fichiers = sorted(DOSSIER.glob("*.json"))
+    fichiers = sorted(dossier.glob("*.json"))
     signature = tuple((f.name, f.stat().st_mtime_ns) for f in fichiers)
-    if signature == _cache["signature"]:
-        return _cache["entrees"]
+    memo = _caches.get(str(dossier))
+    if memo and memo[0] == signature:
+        return memo[1]
     entrees = []
     for f in fichiers:
         try:
@@ -114,7 +120,7 @@ def lister() -> list[dict]:
         except Exception:
             continue  # fichier incomplet ou illisible : ignoré
     entrees.sort(key=lambda e: e["cree"], reverse=True)
-    _cache.update(signature=signature, entrees=entrees)
+    _caches[str(dossier)] = (signature, entrees)
     return entrees
 
 
