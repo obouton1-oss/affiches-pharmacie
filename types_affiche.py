@@ -228,10 +228,17 @@ def correspondant(donnees: dict, reglages: dict):
 # Session (l'état de session est passé en paramètre : Streamlit, ou un simple dictionnaire dans les tests)
 # ----------------------------------------------------------------------------
 def reglages_courants(ss) -> dict:
-    """Les réglages en cours dans le formulaire (mêmes champs qu'un type), normalisés."""
+    """Les réglages en cours dans le formulaire (mêmes champs qu'un type), normalisés.
+
+    L'orientation (w_paysage) n'est affichée que pour un format standard, et les dimensions (w_lg, w_ht) que pour le
+    format personnalisé. Streamlit oublie un champ qui n'a pas été affiché lors du dernier affichage ; or cette fonction
+    est aussi appelée par des boutons (« Mettre à jour ce type », « Créer tout de suite »), exécutés avant le nouvel
+    affichage. Ces trois clés sont donc lues avec .get : quand elles manquent, c'est qu'elles ne concernent pas le format
+    choisi, et normaliser_reglages les ignore dans ce cas."""
     format_ = ss["w_format"]
-    return normaliser_reglages({"format": format_, "paysage": ss["w_paysage"], "largeur_mm": ss["w_lg"],
-                                "hauteur_mm": ss["w_ht"], "logo": ss["w_logo"], "majuscules": ss["w_majuscules"],
+    return normaliser_reglages({"format": format_, "paysage": ss.get("w_paysage", False),
+                                "largeur_mm": ss.get("w_lg"), "hauteur_mm": ss.get("w_ht"),
+                                "logo": ss["w_logo"], "majuscules": ss["w_majuscules"],
                                 "photo": ss["w_photo"], "style": ss["style"]})
 
 
