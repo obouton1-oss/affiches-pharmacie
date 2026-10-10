@@ -46,7 +46,8 @@ def orienter(taille_page, paysage: bool):
 
 
 ELEMENTS = {"image": "Visuel", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
-            "prix": "Prix", "ligne": "Texte sous le prix", "pastille": "Pastille", "dates": "Dates", "logo": "Logo"}
+            "prix": "Prix", "kicker": "Petit texte de l'offre", "ligne": "Texte sous le prix", "pastille": "Pastille",
+            "dates": "Dates", "logo": "Logo"}
 # Ordre des textes sous le visuel, de haut en bas (réglage « ordre » du style ; le texte sous le prix suit toujours le prix)
 ORDRE_DEFAUT = ("marque", "detail", "prix_barre", "prix", "dates")
 LIBELLES_ORDRE = {"marque": "Marque", "detail": "Produit (détail)", "prix_barre": "Prix barré", "prix": "Prix promo",
@@ -74,8 +75,16 @@ STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix":
                 "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848",
                 # couleur du détail du produit : vide = la même que la marque (cas d'origine, et des affiches déjà faites)
                 "couleur_detail": None,
+                # couleur du petit texte au-dessus de l'offre (autres types de promotion) : vide = celle du prix
+                "couleur_kicker": None,
                 # police, gras, italique et souligné propres à chaque texte (voir TEXTES) ; vide = tout comme avant
                 "textes": {}}
+
+
+def couleur_kicker(st) -> str:
+    """Couleur du petit texte au-dessus de l'offre : celle du prix tant qu'aucune autre n'est choisie."""
+    c = st.get("couleur_kicker")
+    return c if isinstance(c, str) and re.match(r"^#[0-9A-Fa-f]{6}$", c) else st["couleur_prix"]
 
 
 def couleur_detail(st) -> str:
@@ -87,7 +96,9 @@ def couleur_detail(st) -> str:
 # style["textes"] = {texte: {"police": famille, "gras": bool, "italique": True, "souligne": True}} ; seuls les choix qui
 # diffèrent de l'origine y figurent (police absente = celle de l'affiche).
 TEXTES = {"marque": ("Marque", True), "detail": ("Détail du produit", False), "prix": ("Prix", True),
+          "kicker": ("Petit texte de l'offre", True),
           "prix_barre": ("Prix barré", False), "ligne": ("Texte sous le prix", False), "dates": ("Dates", False)}
+# Le petit texte au-dessus de l'offre suit la police et le style du prix tant qu'il n'a pas les siens.
 ANGLE_ITALIQUE = 12  # degrés : l'inclinaison de l'Helvetica penchée, appliquée à toutes les polices
 _TAN_ITALIQUE = math.tan(math.radians(ANGLE_ITALIQUE))
 
@@ -378,11 +389,11 @@ def _largeur_grand(prix, grand, taille, gras):
     return _largeur_texte(grand, gras, taille) if grand else _largeur_prix(prix, taille, gras)
 
 
-def _contenu_bandeau(prix, grand, kicker, taille, gras, hc):
+def _contenu_bandeau(prix, grand, kicker, taille, gras, hc, police_kicker=None):
     """(largeur du contenu, hauteur ajoutée par le petit texte) du bandeau pour un corps `taille`."""
     w = _largeur_grand(prix, grand, taille, gras)
     if kicker:
-        w = max(w, _largeur_texte(kicker, gras, taille * K_TAILLE))
+        w = max(w, _largeur_texte(kicker, police_kicker or gras, taille * K_TAILLE))
     return w, ((K_ECART + hc * K_TAILLE) * taille if kicker else 0.0)
 
 
@@ -598,10 +609,14 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     f_barre, i_barre, u_barre = police_texte(st, "prix_barre")
     f_ligne, i_ligne, u_ligne = police_texte(st, "ligne")
     f_dates, i_dates, u_dates = police_texte(st, "dates")
+    # petit texte au-dessus de l'offre : comme le prix, sauf choix propre
+    f_kicker, i_kicker, u_kicker = (police_texte(st, "kicker") if "kicker" in st["textes"]
+                                    else (f_prix, i_prix, u_prix))
     hc = _hauteur_chiffre(f_prix)
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
     col_det = HexColor(couleur_detail(st))
     col_accent, col_sec = HexColor(st["couleur_accent"]), HexColor(st["couleur_secondaire"])
+    col_kicker = HexColor(couleur_kicker(st))
     marque, detail = (marque or "").strip(), (detail or "").strip()
     if not marque:
         logo_marque = None  # pas de marque : rien à remplacer par un logo
@@ -699,7 +714,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
 
         taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
         while True:
-            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc)
+            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc, f_kicker)
             if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
                 break
             taille_p -= 1
@@ -828,11 +843,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.line(cx - wt / 2 - t * 0.1, base - t * 0.25, cx + wt / 2 + t * 0.1, base + t * 0.95)  # diagonale ↗
         cadres["prix_barre"] = (cx - wt / 2, base - t * 0.25, cx + wt / 2, base + t * 0.95)
 
-    # ---- Prix (ou texte principal de l'offre), avec son petit texte au-dessus
+    # ---- Prix (ou texte principal de l'offre), avec son petit texte au-dessus. Le petit texte se règle à part
+    # (élément « kicker ») : tant qu'il n'est ni déplacé ni agrandi, il reste dans le bandeau, au-dessus de l'offre ;
+    # déplacé ou agrandi, il le quitte et le bandeau n'entoure plus que l'offre.
     dx, dy, s = _reg(reglages, "prix")
     p = taille_p * s
     cx = cx_t + dx * W
-    wp, h_kicker_p = _contenu_bandeau(prix, grand, kicker, p, f_prix, hc)
+    kdx, kdy, ks = _reg(reglages, "kicker")
+    k_detache = bool(kicker) and (abs(kdx) > 1e-9 or abs(kdy) > 1e-9 or abs(ks - 1.0) > 1e-9)
+    wp, h_kicker_p = _contenu_bandeau(prix, grand, "" if k_detache else kicker, p, f_prix, hc, f_kicker)
     base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
     if fond:  # bandeau coloré derrière le prix
         bx0, bx1 = cx - wp / 2 - pad_x * p, cx + wp / 2 + pad_x * p
@@ -845,7 +864,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.setLineWidth(max(1.5, g * 0.004 * s))
         c.line(cx - wp / 2, base - p * 0.07, cx + wp / 2, base - p * 0.07)
         cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc + h_kicker_p)
-    _dessiner_bandeau(c, prix, grand, kicker, cx, base, p, f_prix, col_prix, hc, i_prix, u_prix)
+    _dessiner_bandeau(c, prix, grand, "", cx, base, p, f_prix, col_prix, hc, i_prix, u_prix)
+    if kicker:
+        h_att = (K_ECART + hc * K_TAILLE) * p  # place du petit texte dans le bandeau (position d'origine)
+        base_att = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_att) / 2
+        tk = p * K_TAILLE * ks
+        kcx, kbase = cx + kdx * W, base_att + hc * p + K_ECART * p + kdy * H
+        _dessiner_texte(c, kicker, kcx, kbase, tk, f_kicker, col_kicker, hc, i_kicker, u_kicker)
+        wk = _largeur_texte(kicker, f_kicker, tk)
+        cadres["kicker"] = (kcx - wk / 2, kbase - tk * 0.2, kcx + wk / 2, kbase + tk * (hc + 0.15))
 
     # ---- Texte sous le prix
     if l_ligne:

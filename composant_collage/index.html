@@ -68,11 +68,16 @@ async function reduire(dataUrl){
   const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(im, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.92);
 }
+let source = "";   // adresse d'origine de l'image copiée (si le navigateur la donne) : l'outil y cherche la version en grand
 function recu(data, w, h, origine, nom){
   termine = true;
   vignette.src = data;
   etat("recu", "Image reçue (" + w + " × " + h + " px)", "Elle est utilisée dans l'outil. Pour la remplacer, coller une autre image.");
-  envoyer({donnees: data, origine, nom: nom || "image", largeur: w, hauteur: h});
+  envoyer({donnees: data, origine, nom: nom || "image", largeur: w, hauteur: h, source});
+}
+function sourceDe(html){
+  const m = /<img[^>]+src=["'](https?:\/\/[^"']+)["']/i.exec(html || "");
+  return m ? m[1].replace(/&amp;/g, "&") : "";
 }
 async function recevoirDonnees(data, origine, nom, taille){
   etat("travail", "Lecture de l'image…", "");
@@ -118,6 +123,7 @@ document.addEventListener("paste", e => {
   if(!cd) return;
   e.preventDefault();
   const f = fichierImage(cd);
+  source = sourceDe(cd.getData("text/html"));
   if(f) recevoirFichier(f);
   else traiterTexte(cd.getData("text/uri-list") || cd.getData("text/plain"), cd.getData("text/html"));
 });
@@ -129,6 +135,7 @@ zone.addEventListener("drop", e => {
   const dt = e.dataTransfer;
   if(!dt) return;
   const f = fichierImage(dt);
+  source = sourceDe(dt.getData("text/html"));
   if(f) recevoirFichier(f);
   else traiterTexte(dt.getData("text/uri-list") || dt.getData("text/plain"), dt.getData("text/html"));
 });

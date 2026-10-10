@@ -48,6 +48,8 @@ def style_normalise(style) -> dict:
         res[cle] = valeur.upper() if _HEX.match(valeur) else str(af.STYLE_DEFAUT[cle]).upper()
     detail = res.get("couleur_detail")  # facultative : vide = même couleur que la marque
     res["couleur_detail"] = detail.upper() if isinstance(detail, str) and _HEX.match(detail) else None
+    kicker = res.get("couleur_kicker")  # facultative : vide = même couleur que le prix
+    res["couleur_kicker"] = kicker.upper() if isinstance(kicker, str) and _HEX.match(kicker) else None
     res["textes"] = af.textes_valides(res.get("textes"))  # police et style propres à chaque texte
     res["fond_prix"] = bool(res["fond_prix"])
     if res["cadre"] not in af.CADRES:

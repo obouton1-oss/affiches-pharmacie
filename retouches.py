@@ -32,7 +32,7 @@ _CHAMPS_HISTORIQUE = ("style", "reglages", "elements", "marque", "detail", "w_pr
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 # Couleur de chaque texte de l'affiche : clé du style (plusieurs textes partagent parfois une couleur)
-COULEUR_ELEMENT = {"marque": "couleur_nom", "detail": "couleur_detail", "prix": "couleur_prix",
+COULEUR_ELEMENT = {"marque": "couleur_nom", "detail": "couleur_detail", "prix": "couleur_prix", "kicker": "couleur_kicker",
                    "prix_barre": "couleur_secondaire", "dates": "couleur_secondaire", "ligne": "couleur_nom"}
 PARTAGE = {"marque": "Couleur partagée avec le texte sous le prix (et le détail s'il n'a pas sa propre couleur).",
            "ligne": "Couleur partagée avec la marque.",
@@ -117,7 +117,10 @@ def peut_retablir(ss):
 # Description de la barre de réglages de chaque élément (envoyée à l'aperçu)
 # ----------------------------------------------------------------------------
 def _style_texte(style, texte):
-    etat = af.textes_valides(style.get("textes")).get(texte, {})
+    textes = af.textes_valides(style.get("textes"))
+    if texte == "kicker" and "kicker" not in textes:  # le petit texte de l'offre suit le prix tant qu'il n'a pas son style
+        texte = "prix"
+    etat = textes.get(texte, {})
     return {"police": etat.get("police"), "gras": etat.get("gras", af.TEXTES[texte][1]),
             "italique": etat.get("italique", False), "souligne": etat.get("souligne", False)}
 
@@ -125,6 +128,8 @@ def _style_texte(style, texte):
 def _couleur_style(style, cle):
     if cle == "couleur_detail":
         return af.couleur_detail(style)
+    if cle == "couleur_kicker":
+        return af.couleur_kicker(style)
     return style.get(cle) or af.STYLE_DEFAUT.get(cle) or "#000000"
 
 
@@ -383,6 +388,7 @@ def _appliquer(ss, ev):
         if theme:
             ss["style"].update(theme)
             ss["style"]["couleur_detail"] = None
+            ss["style"]["couleur_kicker"] = None
             ss["theme_choisi"] = ev["valeur"]
             ss["ver"] = ss.get("ver", 0) + 1
         noter(ss)

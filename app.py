@@ -38,6 +38,7 @@ import preferences
 import types_affiche
 from chemins import EN_LIGNE
 from affiche import (CADRES, DOSSIER_POLICES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, TEXTES, THEMES, apercu_png,
+                     couleur_detail, couleur_kicker,
                      disposition_a4, libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut,
                      textes_valides)
 
@@ -214,6 +215,7 @@ def appliquer_theme():
     if theme:
         ss.style.update(theme)
         ss.style["couleur_detail"] = None  # un thème colore la marque et le détail de la même couleur
+        ss.style["couleur_kicker"] = None  # et le petit texte de l'offre comme le prix
         ss.ver += 1  # recrée les sélecteurs de couleur avec les nouvelles valeurs
 
 
@@ -226,12 +228,70 @@ DERRIERE, DEVANT = "Derrière le visuel", "Devant le visuel"
 
 
 def maj_texte(texte, cle_police, cle_style):
-    """Police, gras, italique et souligné d'un texte de l'affiche (marque, détail, prix, prix barré, texte sous le prix,
-    dates) ; ce qui est comme à l'origine n'est pas gardé."""
+    """Police, gras, italique et souligné d'un texte de l'affiche (marque, détail, prix, petit texte de l'offre, prix
+    barré, texte sous le prix, dates) ; ce qui est comme à l'origine n'est pas gardé."""
     styles = ss[cle_style] or []
     brut = {"police": ss[cle_police] if ss[cle_police] in POLICES else None, "gras": "gras" in styles,
             "italique": "italique" in styles, "souligne": "souligne" in styles}
     ss.style["textes"] = textes_valides({**(ss.style.get("textes") or {}), texte: brut})
+    ss.ver += 1  # le même réglage est aussi proposé ailleurs (sous le champ de saisie, « Police et couleurs ») : à jour partout
+
+
+def etat_texte(texte):
+    """Police (None = celle de l'affiche), gras, italique, souligné d'un texte, tels qu'ils s'impriment. Le petit texte
+    de l'offre suit le prix tant qu'il n'a pas son propre style."""
+    textes = textes_valides(ss.style.get("textes"))
+    source = "prix" if texte == "kicker" and "kicker" not in textes else texte
+    etat = textes.get(source, {})
+    return {"police": etat.get("police"), "gras": etat.get("gras", TEXTES[source][1]),
+            "italique": etat.get("italique", False), "souligne": etat.get("souligne", False)}
+
+
+COULEUR_TEXTE = {"marque": "couleur_nom", "detail": "couleur_detail", "prix": "couleur_prix",
+                 "kicker": "couleur_kicker", "prix_barre": "couleur_secondaire", "dates": "couleur_secondaire"}
+
+
+def couleur_de(cle):
+    """Couleur imprimée pour une clé de couleur du style (le détail suit la marque, le petit texte de l'offre suit le
+    prix, tant qu'ils n'ont pas la leur)."""
+    if cle == "couleur_detail":
+        return couleur_detail(ss.style)
+    if cle == "couleur_kicker":
+        return couleur_kicker(ss.style)
+    return ss.style.get(cle) or ss.style["couleur_nom"]
+
+
+def maj_couleur(cle, cle_widget):
+    ss.style[cle] = ss[cle_widget]
+    ss.ver += 1  # sélecteurs de couleur des autres endroits à jour
+
+
+def maj_taille(el, cle_widget):
+    ss.reglages[el]["s"] = ss[cle_widget] / 100
+    ss.ver += 1
+
+
+def reglages_texte(el, aide_couleur=""):
+    """Sous le champ où l'on écrit un texte : sa police, gras / italique / souligné, sa couleur et sa taille sur l'affiche
+    (les mêmes réglages que dans « Police et couleurs », « Réglages précis » et la barre au-dessus de l'aperçu)."""
+    etat = etat_texte(el)
+    options = [COMME_AFFICHE] + POLICES
+    kp, ks = f"sf_police_{el}_{ss.ver}", f"sf_style_{el}_{ss.ver}"
+    kc, kt = f"sf_couleur_{el}_{ss.ver}", f"sf_taille_{el}_{ss.ver}"
+    cle_couleur = COULEUR_TEXTE[el]
+    with st.container(key=f"reglages_texte_{el}"):
+        c1, c2, c3, c4 = st.columns([3, 2.3, 0.9, 3.2], vertical_alignment="center")
+        c1.selectbox("Police", options, index=options.index(etat["police"]) if etat["police"] in POLICES else 0,
+                     key=kp, label_visibility="collapsed", on_change=maj_texte, args=(el, kp, ks),
+                     help="Police de ce texte")
+        c2.segmented_control("Style", STYLES_TEXTE, selection_mode="multi",
+                             default=[s for s in STYLES_TEXTE if etat[s]], format_func=ICONES_STYLE.get, key=ks,
+                             label_visibility="collapsed", help=AIDE_STYLE, on_change=maj_texte, args=(el, kp, ks))
+        c3.color_picker("Couleur", couleur_de(cle_couleur), key=kc, label_visibility="collapsed",
+                        on_change=maj_couleur, args=(cle_couleur, kc), help=aide_couleur or "Couleur de ce texte")
+        c4.slider("Taille", 20, 400, int(round(ss.reglages[el]["s"] * 100)), step=5, format="%d %%", key=kt,
+                  label_visibility="collapsed", on_change=maj_taille, args=(el, kt),
+                  help="Taille de ce texte sur l'affiche (100 % = taille calculée par l'outil)")
 
 
 def reinitialiser_textes():
@@ -241,15 +301,14 @@ def reinitialiser_textes():
 
 def ligne_texte(texte, libelle):
     """Une ligne « libellé, police, gras / italique / souligné » pour un texte de l'affiche."""
-    etat = textes_valides(ss.style.get("textes")).get(texte, {})
+    etat = etat_texte(texte)
     options = [COMME_AFFICHE] + POLICES
     kp, ks = f"tx_police_{texte}_{ss.ver}", f"tx_style_{texte}_{ss.ver}"
     c1, c2, c3 = st.columns([2.2, 3, 2.6], vertical_alignment="center")
     c1.markdown(libelle)
     c2.selectbox(libelle, options, index=options.index(etat["police"]) if etat.get("police") in POLICES else 0,
                  key=kp, label_visibility="collapsed", on_change=maj_texte, args=(texte, kp, ks))
-    actifs = {"gras": etat.get("gras", TEXTES[texte][1]), "italique": etat.get("italique", False),
-              "souligne": etat.get("souligne", False)}
+    actifs = {"gras": etat["gras"], "italique": etat["italique"], "souligne": etat["souligne"]}
     c3.segmented_control(libelle, STYLES_TEXTE, selection_mode="multi", default=[s for s in STYLES_TEXTE if actifs[s]],
                          format_func=ICONES_STYLE.get, key=ks, label_visibility="collapsed", help=AIDE_STYLE,
                          on_change=maj_texte, args=(texte, kp, ks))
@@ -398,6 +457,19 @@ def formulaire_promo(type_):
                        "le calcul. Sans prix normal, seule l'offre est affichée.")
         if res["resume"]:
             st.caption("Calcul : " + promos.sans_balises(res["resume"]))
+        # Police, style, couleur et taille du texte de l'offre et de son petit texte au-dessus, réglables séparément
+        if res.get("rendu"):
+            habillage.petit_titre("Texte principal de l'offre")
+            reglages_texte("prix")
+            if (res["rendu"].get("kicker") or "").strip():
+                habillage.petit_titre(f"Petit texte au-dessus : « {promos.sans_balises(res['rendu']['kicker'])} »")
+                reglages_texte("kicker")
+                g = ss.reglages.get("kicker") or {}
+                if any(abs(float(g.get(k, d)) - d) > 1e-9 for k, d in (("dx", 0.0), ("dy", 0.0), ("s", 1.0))):
+                    st.button("Remettre le petit texte à sa place, au-dessus de l'offre", key="kicker_raz",
+                              on_click=reinitialiser, args=("kicker",), type="tertiary", icon=":material/restart_alt:")
+                else:
+                    st.caption("Il peut aussi être déplacé seul sur l'aperçu : il quitte alors le bandeau de l'offre.")
         st.text_input("Précision sous l'offre (facultatif)", key="w_promo_precision",
                       placeholder="ex. : sur toute la gamme, dans la limite des stocks disponibles")
 
@@ -843,6 +915,14 @@ def legende_proposition(p):
     else:
         statut = "Non vérifié"
     dims = f"{p['largeur']}×{p['hauteur']} px" if p.get("largeur") else "taille inconnue"
+    nette = p.get("nette")
+    if nette:  # résolution réelle (une miniature agrandie est grande mais floue)
+        grand = max(p.get("largeur") or 0, p.get("hauteur") or 0)
+        qualite = ("Très nette" if nette >= 1200 else "Nette" if nette >= 700 else "Correcte" if nette >= 400
+                   else "Petite")
+        dims = f"{qualite} · {dims}" + (f" (détails ≈ {nette} px)" if grand and nette < grand * 0.8 else "")
+        if p.get("agrandie"):
+            dims += " · version d'origine retrouvée"
     fond = "Fond blanc" if p.get("studio") else "Photo"
     return f"**{statut}**  \n{fond} · {dims}  \n{p['site']}"
 
@@ -990,7 +1070,8 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
             if ss.cand_extra:
                 proposer_choix_extra(ss.cand_extra)
             habillage.sous_titre("Coller une image copiée")
-            st.caption("Clic droit sur l'image (Google Images, site…) › « Copier l'image », puis cliquer dans le cadre et coller.")
+            st.caption("Clic droit sur l'image (Google Images, site…) › « Copier l'image », puis cliquer dans le cadre et "
+                       "coller. L'adresse de la page du produit peut aussi être collée.")
             collee2 = collage_image(key=f"collage_extra_{ss.raz}_{ss.extra_n}", default=None)
             if collee2 and collee2.get("ts") != ss.derniere_collee_extra:
                 ss.derniere_collee_extra = collee2["ts"]
@@ -1210,7 +1291,9 @@ with col_form:
                         st.rerun()
                 habillage.sous_titre("Coller une image copiée")
                 st.caption("Sur Google Images ou sur un site : clic droit sur l'image › « Copier l'image ». "
-                           "Revenir ici, cliquer dans le cadre, puis coller.")
+                           "Revenir ici, cliquer dans le cadre, puis coller. On peut aussi coller l'adresse de la page "
+                           "du produit (sa photo principale est prise) ; l'outil va chercher la photo en grand si le "
+                           "site la propose.")
                 collee = collage_image(key=f"collage_{ss.raz}", default=None)
                 if collee and collee.get("ts") != ss.derniere_collee:  # une image collée n'est prise en compte qu'une fois
                     ss.derniere_collee = collee["ts"]
@@ -1225,6 +1308,10 @@ with col_form:
                         ss.props_choisie, ss.props_ouvertes = None, False  # propositions repliées, toujours disponibles
                         retablir_traitement()
                         st.toast("Image collée : elle est utilisée pour l'affiche.", icon=":material/check_circle:")
+                        if max(img.size) < 500:
+                            st.toast(f"Image collée petite ({max(img.size)} px), floue à l'impression : sur Google "
+                                     "Images, cliquer d'abord sur l'image pour l'ouvrir en grand, puis la copier ; ou "
+                                     "coller l'adresse de la page du produit.", icon=":material/warning:")
                 televerse = st.file_uploader("Ou importer un fichier image (glisser-déposer)",
                                              type=["png", "jpg", "jpeg", "webp"], key=f"televerse_{ss.raz}")
                 if televerse is not None:
@@ -1340,8 +1427,10 @@ with col_form:
         # --- Textes de l'affiche
         habillage.sous_titre("Textes de l'affiche")
         marque = st.text_input("Marque (affichée en gros, sous la photo)", value=ss.marque)
+        reglages_texte("marque", "Couleur de la marque (le détail du produit la suit tant qu'il n'a pas la sienne)")
         detail = st.text_area("Détail du produit (affiché plus petit sous la marque ; Entrée = passage à la ligne)",
                               value=ss.detail, height=80)
+        reglages_texte("detail")
         ss.marque, ss.detail = marque, detail
         majuscules = st.checkbox("Marque en majuscules", key="w_majuscules")
         nom = catalogue.nom_complet(marque, detail)
@@ -1427,6 +1516,10 @@ with col_form:
                                      help="Écrire 7,90 ou 7.9 : l'outil met le prix en forme sur l'affiche.")
             barre = c2.checkbox("Afficher un prix barré", key="w_barre_on")
             prix_barre_txt = c2.text_input("Prix barré (€)", placeholder="10,50", key="w_barre") if barre else ""
+            reglages_texte("prix")
+            if barre:
+                habillage.petit_titre("Prix barré")
+                reglages_texte("prix_barre", "Couleur partagée avec les dates")
         else:
             prix_txt, barre, prix_barre_txt = "", False, ""
             resultat_promo, promo_enregistree = formulaire_promo(type_promo)
@@ -1493,16 +1586,20 @@ with col_form:
                                 else "Couleur de la marque et du détail")]
             if detail_autre:
                 champs_couleurs.append(("couleur_detail", "Couleur du détail"))
+            if type_promo != promos.STANDARD:
+                champs_couleurs.append(("couleur_kicker", "Petit texte au-dessus de l'offre"))
             champs_couleurs += [("couleur_prix", "Couleur du prix"), ("couleur_fond_prix", "Couleur du fond du prix"),
                                 ("couleur_accent", "Filet sous le prix (sans fond)"),
                                 ("couleur_secondaire", "Dates et prix barré")]
             for i, (cle, libelle) in enumerate(champs_couleurs):
                 cw = f"cp_{cle}_{ss.ver}"
-                (p1 if i % 2 == 0 else p2).color_picker(libelle, ss.style.get(cle) or ss.style["couleur_nom"],
-                                                        key=cw, on_change=maj_style, args=(cle, cw))
+                (p1 if i % 2 == 0 else p2).color_picker(libelle, couleur_de(cle), key=cw, on_change=maj_couleur,
+                                                        args=(cle, cw))
             st.markdown("**Police et style de chaque texte**")
             st.caption("Chaque texte peut avoir sa police, en gras, en italique ou souligné, indépendamment des autres.")
             for texte, (libelle, _) in TEXTES.items():
+                if texte == "kicker" and type_promo == promos.STANDARD:
+                    continue  # pas de petit texte au-dessus du prix promo
                 ligne_texte(texte, libelle)
             st.button("Remettre les polices et styles d'origine", key="textes_raz", on_click=reinitialiser_textes,
                       type="tertiary", icon=":material/restart_alt:",

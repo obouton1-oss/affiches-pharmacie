@@ -74,6 +74,13 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 .hab-etape .titre{font-size:1.15rem;font-weight:700;color:var(--texte);letter-spacing:-.005em}
 .hab-etape-aide{color:var(--muet);font-size:.9rem;margin:-.35rem 0 .1rem 2.65rem;line-height:1.35}
 .hab-sous-titre{font-weight:650;font-size:.95rem;color:var(--texte);margin:.25rem 0 -.2rem}
+.hab-petit-titre{font-size:.82rem;font-weight:600;color:var(--muet);margin:.1rem 0 -.55rem .1rem}
+/* Réglages d'un texte (police, style, couleur, taille), juste sous son champ de saisie */
+[class*="st-key-reglages_texte_"]{background:#F6F8FB;border:1px solid var(--bord-doux);border-radius:10px;
+  padding:.3rem .55rem .25rem;margin-top:-.45rem}
+[class*="st-key-reglages_texte_"] [data-testid="stSlider"]{padding:0 .35rem}
+[class*="st-key-reglages_texte_"] [data-baseweb="select"] > div{min-height:2.1rem}
+[class*="st-key-reglages_texte_"] [data-testid="stColorPicker"] > div{justify-content:center}
 
 /* Aperçu : colonne qui reste visible pendant la saisie */
 @media (min-width:700px){
@@ -171,7 +178,10 @@ AIDE_MARKDOWN = """
 - **Annuler** une retouche : flèche ↶ au-dessus de l'aperçu (ou Ctrl + Z après un clic sur l'affiche) ; ↷ pour rétablir.
 - **Au clavier**, après un clic sur un élément : flèches pour le déplacer finement (Maj + flèche : plus vite), + / − pour la taille, Suppr pour retirer un élément ajouté, Ctrl + D pour le dupliquer, Échap pour désélectionner. Un double-clic sur un texte permet de l'écrire directement.
 - Sans élément sélectionné, la barre au-dessus de l'aperçu ajoute un texte, un prix ou une forme, et change la police ou le thème de couleurs de toute l'affiche.
-- Pas de visuel ? Copier une image sur le web, cliquer dans le cadre « Coller une image » et coller (Ctrl + V, ou ⌘ + V sur Mac).
+- Pas de visuel ? Copier une image sur le web, cliquer dans le cadre « Coller une image » et coller (Ctrl + V, ou ⌘ + V sur Mac). On peut aussi y coller l'adresse de la page du produit : sa photo principale est prise. Dans tous les cas, l'outil va chercher la photo en grand quand le site la propose (les sites montrent souvent une miniature).
+- Les photos proposées indiquent leur netteté réelle (« Très nette », « Nette », « Correcte », « Petite ») : une miniature agrandie par un site est grande mais floue, elle est signalée et classée après.
+- Sous chaque texte (marque, détail, prix), une ligne règle sa police, gras / italique / souligné, sa couleur et sa taille.
+- Autres offres (« LE 2e À –50 % »…) : le petit texte au-dessus de l'offre a ses propres réglages ; déplacé sur l'aperçu, il quitte le bandeau.
 - **Enregistrer et passer à la suivante** prépare l'affiche d'après : produit et prix repartent à zéro, le format, le style et les dates sont gardés.
 - **Reprendre une affiche récente** (sous la recherche) rouvre une affiche déjà faite pour la modifier.
 - **Types d'affiche** (en haut de la page) : un type garde un format, un logo, une photo (ou non), une police et des couleurs, par exemple « Petite affiche de rayon ». **Gérer les types › Créer pas à pas** pose les mêmes questions qu'à la première visite (avec import d'une affiche existante, image ou PDF, pour en relever les couleurs) ; « Créer tout de suite » reprend simplement les réglages de l'affiche en cours. Ensuite, un clic suffit pour passer d'un type à l'autre.
@@ -213,6 +223,11 @@ def titre_etape(numero, titre, aide="", fait=False):
 
 def sous_titre(texte):
     st.html(f'<div class="hab-sous-titre">{escape(texte)}</div>')
+
+
+def petit_titre(texte):
+    """Petit intitulé discret au-dessus d'une ligne de réglages."""
+    st.html(f'<div class="hab-petit-titre">{escape(texte)}</div>')
 
 
 

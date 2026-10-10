@@ -283,12 +283,13 @@ document.addEventListener("keydown", e => {
 });
 
 // ---------------------------------------------------------------- menus (palette, polices, formes, actions)
-let popPour = null;
-function fermerPop(){ pop.hidden = true; pop.innerHTML = ""; popPour = null; document.querySelectorAll(".btn.ouvert").forEach(b => b.classList.remove("ouvert")); }
+let popPour = null, popTitre = "";
+function fermerPop(){ pop.hidden = true; pop.innerHTML = ""; popPour = null; popTitre = ""; document.querySelectorAll(".btn.ouvert").forEach(b => b.classList.remove("ouvert")); }
 function ouvrirPop(bouton, contenu){
   if(popPour === bouton){ fermerPop(); return; }
   fermerPop();
-  pop.innerHTML = ""; pop.appendChild(contenu); pop.hidden = false; popPour = bouton; bouton.classList.add("ouvert");
+  pop.innerHTML = ""; pop.appendChild(contenu); pop.hidden = false; popPour = bouton; popTitre = bouton.title;
+  bouton.classList.add("ouvert");
   const rb = bouton.getBoundingClientRect(), largeur = document.body.clientWidth;
   pop.style.maxHeight = "none";
   const w = pop.offsetWidth;
@@ -379,7 +380,14 @@ function construireBarre(){
   const champ = $("zoneTexte").querySelector(".champ");
   const enCours = champ && document.activeElement === champ && signature && JSON.parse(signature)[0] === actif;
   if(sig === signature){ if(focusApres && focusApres === actif) focaliserTexte(); return; }
+  // un menu ouvert pour le même élément (palette ouverte juste après avoir écrit un texte, par exemple) est rouvert
+  // avec les valeurs à jour au lieu de se fermer sous le doigt
+  const aRouvrir = (!pop.hidden && popTitre && signature && JSON.parse(signature)[0] === actif) ? popTitre : "";
   signature = sig; fermerPop();
+  if(aRouvrir) setTimeout(() => {
+    const b = [...outilsEl.querySelectorAll(".btn")].find(x => x.title === aRouvrir);
+    if(b && pop.hidden) b.click();
+  }, 0);
   const puce = $("puce"), zt = $("zoneTexte");
   outilsEl.innerHTML = "";
   if(!o){

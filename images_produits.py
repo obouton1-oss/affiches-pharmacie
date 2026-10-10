@@ -52,6 +52,7 @@ MAX_PAGE_OCTETS = 2_500_000       # une page plus lourde est lue jusqu'à cette 
 MAX_PAGES = 18                    # pages ouvertes par étape de la recherche vérifiée
 DELAI_ETAPE = 22                  # secondes accordées à l'ouverture des pages d'une étape
 MIN_COTE_VERIFIE = 300            # produit plus petit (grand côté, en pixels, marges retirées) : non proposé
+DELAI_AGRANDIR = 10               # secondes accordées à la recherche des versions en grand des meilleures photos
 DOMAINES_IGNORES = ("google.", "facebook.", "instagram.", "pinterest.", "youtube.", "youtu.be", "tiktok.",
                     "twitter.", "x.com", "linkedin.", "reddit.", "amazon.", "ebay.", "aliexpress.", "leboncoin.",
                     "wikipedia.", "duckduckgo.", "bing.com")
@@ -182,9 +183,25 @@ def telecharger_octets(url: str, referer: str = "", max_octets: int = MAX_IMAGE_
         return bytes(octets)
 
 
-def image_depuis_octets(octets: bytes) -> Image.Image:
+COTE_UTILE = 2600  # au-delà (pixels), l'image est réduite dès sa lecture : assez pour imprimer net, sans surcharger la mémoire
+
+
+def _ouvrir(octets: bytes) -> Image.Image:
+    """Image lue depuis des octets ; une très grande photo (3000 px et plus) est décodée directement en plus petit."""
     img = Image.open(io.BytesIO(octets))
+    if max(img.size) > COTE_UTILE:
+        try:
+            img.draft("RGB", (COTE_UTILE, COTE_UTILE))  # JPEG : décodage réduit, bien plus léger en mémoire
+        except Exception:
+            pass
     img.load()
+    if max(img.size) > COTE_UTILE:
+        img.thumbnail((COTE_UTILE, COTE_UTILE), Image.LANCZOS)
+    return img
+
+
+def image_depuis_octets(octets: bytes) -> Image.Image:
+    img = _ouvrir(octets)
     try:
         img = ImageOps.exif_transpose(img)  # photo prise « couchée » : remise à l'endroit
     except Exception:
@@ -197,14 +214,219 @@ def telecharger_image(url: str, referer: str = "") -> Image.Image:
 
 
 def obtenir_image(candidat: dict) -> Image.Image:
-    """Image complète d'une proposition : celle déjà reçue pendant la recherche, sinon téléchargée."""
+    """Image complète d'une proposition : celle déjà reçue pendant la recherche, sinon téléchargée (dans sa plus grande
+    version disponible : voir version_grande)."""
     if candidat.get("octets"):
         return image_depuis_octets(candidat["octets"])
-    return telecharger_image(candidat["image"], referer=candidat.get("page", ""))
+    img = telecharger_image(candidat["image"], referer=candidat.get("page", ""))
+    try:
+        mieux = version_grande(candidat["image"], img, referer=candidat.get("page", ""))
+        if mieux:
+            img = image_depuis_octets(mieux["octets"])
+    except Exception:
+        pass
+    return img
+
+
+# --------------------------------------------------------------------------- Photo en grand et netteté réelle
+# Les sites marchands montrent souvent une miniature (250 à 400 px) alors que la photo d'origine (1 000 à 3 000 px)
+# est à la même adresse, sans les paramètres de taille, ou sous un autre nom de format. Relevé sur de vrais sites
+# (10/10/2026) : site de marque 400 → 3 000 px en retirant « ?…&height=400 » ; Magento 265 → 1 000 px en retirant
+# « ?width=265… » ; PrestaShop « home_default » 250 px / « product_main_2x » 1 440 px ; « /img/product/400/ » →
+# « /800/ ». Attention : certains sites agrandissent sur demande (« /resize/2000x2000/ » d'une photo de 800 px) :
+# une version n'est gardée que si elle montre la même photo ET qu'elle est réellement plus détaillée.
+_PARAMS_TAILLE = {"w", "width", "h", "height", "sw", "sh", "wid", "hei", "size", "resize", "fit", "canvas", "t", "dpr",
+                  "quality", "q", "qlt", "optimize", "bg-color", "bg", "crop", "fm", "fmt", "auto", "mode", "scale",
+                  "maxwidth", "maxheight", "max-w", "max-h", "imwidth", "imheight", "resmode", "op_sharpen", "rect",
+                  "im", "impolicy", "format", "trim", "pad", "dw", "dh", "ws", "hs", "s"}
+_EXT = r"(?=\.(?:jpe?g|png|webp)$)"
+_FORMATS_PRESTASHOP = ("product_main_2x", "large_default", "thickbox_default")
+MAX_VARIANTES = 5
+GAIN_MINI = 1.6  # une version n'est gardée que si ses détails réels sont au moins 1,6 fois plus fins (voir plus bas)
+
+
+def variantes_grandes(url: str) -> list:
+    """Adresses où la même photo existe peut-être en plus grand (de la plus probable à la moins probable)."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return []
+    chemin, requete = p.path, p.query
+    base = f"{p.scheme}://{p.netloc}"
+    res = []
+
+    def ajouter(ch, req=""):
+        u = base + ch + (("?" + req) if req else "")
+        if u != url and u not in res:
+            res.append(u)
+
+    # 1. paramètres de taille dans l'adresse (?width=265&height=265…) : sans eux, la photo d'origine
+    if requete:
+        from urllib.parse import parse_qsl, urlencode
+        params = parse_qsl(requete, keep_blank_values=True)
+        utiles = [(k, v) for k, v in params if k.lower() not in _PARAMS_TAILLE]
+        if len(utiles) < len(params):
+            if utiles:
+                ajouter(chemin, urlencode(utiles))
+            ajouter(chemin)
+    # 2. formats nommés dans le chemin
+    hote = p.netloc.lower()
+    if re.search(r"open(beauty|food|products|petfood)facts", hote):  # Open Facts : « .400.jpg » → « .full.jpg »
+        if re.search(r"\.\d{2,3}\.jpg$", chemin):
+            ajouter(re.sub(r"\.\d{2,3}\.jpg$", ".full.jpg", chemin))
+    if re.search(r"-\d{2,4}x\d{2,4}" + _EXT, chemin, re.I):  # WordPress : « -300x300.jpg »
+        ajouter(re.sub(r"-\d{2,4}x\d{2,4}" + _EXT, "", chemin, flags=re.I))
+    if "/cdn/shop/" in chemin or "shopify" in hote:  # Shopify : « _600x.jpg », « _grande.jpg »
+        nouveau = re.sub(r"_(?:\d{2,4}x\d{0,4}|x\d{2,4}|pico|icon|thumb|small|compact|medium|large|grande)(?:@\dx)?"
+                         + _EXT, "", chemin, flags=re.I)
+        ajouter(nouveau)
+    if "/media/catalog/product/cache/" in chemin:  # Magento : copie réduite en cache → photo d'origine
+        ajouter(re.sub(r"/media/catalog/product/cache/(?:.*?/)?[0-9a-f]{32}/", "/media/catalog/product/", chemin))
+    if re.search(r"/resize/\d+x\d+/", chemin):  # « /resize/800x800/media/… » → « /media/… »
+        ajouter(re.sub(r"/resize/\d+x\d+/", "/", chemin, count=1))
+    if "/upload/" in chemin and re.search(r"/upload/(?:[a-z]{1,2}_[^/]+)/", chemin):  # Cloudinary : transformations
+        ajouter(re.sub(r"/upload/(?:[a-z]{1,2}_[^/]+/)+", "/upload/", chemin, count=1))
+    m = re.search(r"/(\d+)-([a-z][a-z0-9_]*)/([^/]+)$", chemin)  # PrestaShop : « /34110-home_default/nom.jpg »
+    if m and re.search(r"default|main|home|small|medium|cart|thumb|large", m.group(2)):
+        for fmt in _FORMATS_PRESTASHOP:
+            if fmt != m.group(2):
+                ajouter(chemin[:m.start()] + f"/{m.group(1)}-{fmt}/{m.group(3)}")
+    m = re.search(r"/(?:products?|img|images?|thumbs?|photos?|visuels?)/(\d{2,3})/", chemin, re.I)  # « /img/product/400/ »
+    if m and 60 <= int(m.group(1)) <= 700 and "facts" not in hote:  # (Open Facts : chiffres du code, pas une taille)
+        ajouter(chemin[:m.start(1)] + str(int(m.group(1)) * 2) + chemin[m.end(1):], requete)
+    return res[:MAX_VARIANTES]
+
+
+def resolution_effective(img: Image.Image) -> int:
+    """Taille réelle des détails d'une image (grand côté, en pixels). Une miniature agrandie (photo de 300 px servie
+    en 1 200 px) est floue : sa taille affichée est grande, mais sa résolution effective reste d'environ 300 px.
+    Méthode : on réduit l'image (facteur f) puis on la ré-agrandit, et on compare ce qui se perd à ce qui se perd
+    avec une réduction deux fois plus forte. Dans une image nette, une petite réduction fait déjà perdre une part
+    notable des détails (rapport de 0,27 à 0,31 relevé sur des images nettes) ; dans une image agrandie, presque rien
+    (0,11 à 0,15) tant que f reste au-dessus de sa vraie taille. Étalonné le 10/10/2026 sur des images de synthèse
+    nettes, floues et agrandies ×2 à ×4 : images nettes reconnues comme telles ; agrandies, vraie taille retrouvée à
+    environ 25 % près (jusqu'à 2,5 fois plus pour un dessin très simple agrandi ×7) : assez pour distinguer une
+    photo d'origine d'une miniature agrandie."""
+    from PIL import ImageChops, ImageStat
+    g = img.convert("L")
+    grand = max(g.size)
+    if grand < 32:
+        return grand
+    if grand > 1000:
+        g = g.resize((max(1, round(g.width * 1000 / grand)), max(1, round(g.height * 1000 / grand))), Image.BILINEAR)
+    w, h = g.size
+
+    def perte(f):
+        petit = g.resize((max(2, round(w * f)), max(2, round(h * f))), Image.LANCZOS)
+        return ImageStat.Stat(ImageChops.difference(g, petit.resize((w, h), Image.BICUBIC))).mean[0]
+
+    if perte(0.1) < 0.5:
+        return round(grand * 0.1)  # image presque unie : aucun détail à mesurer
+    for f in (0.9, 0.8, 0.7, 0.6, 0.5, 0.42, 0.35, 0.3, 0.25, 0.2):
+        if perte(f) >= SEUIL_DETAIL * perte(f / 2):
+            return grand if f >= 0.9 else round(grand * f)  # premier niveau où la réduction se voit : vraie taille
+    return round(grand * 0.2)
+
+
+SEUIL_DETAIL = 0.25  # voir resolution_effective
+
+
+def version_grande(url: str, img: Image.Image, referer: str = "", delai=(3, 8)):
+    """Cherche une version plus grande et réellement plus détaillée de la même photo (voir variantes_grandes).
+    Retourne {'url', 'octets', 'img'} (img : produit, marges blanches retirées), ou None."""
+    actuel = rogner_marges_blanches(vers_rgb_blanc(img))
+    if max(actuel.size) >= 1800:
+        return None  # déjà grande
+    eff_ref = resolution_effective(actuel)
+    emp_ref, coul_ref = _empreinte(actuel), _empreinte_couleur(actuel)
+    meilleur = None
+    for v in variantes_grandes(url):
+        try:
+            octets = telecharger_octets(v, referer=referer, delai=delai)
+            produit = rogner_marges_blanches(vers_rgb_blanc(_ouvrir(octets)))
+        except Exception:
+            continue
+        if (max(produit.size) < max(actuel.size) * 1.2 or not _meme_image(emp_ref, _empreinte(produit))
+                or not _meme_image(coul_ref, _empreinte_couleur(produit), 10.0)):
+            continue  # pas la même photo (autre produit, autre vue, autre teinte)
+        eff = resolution_effective(produit)
+        if eff >= eff_ref * GAIN_MINI and (meilleur is None or eff > meilleur["eff"]):
+            meilleur = {"url": v, "octets": octets, "img": produit, "eff": eff}
+            if eff >= 1500:
+                break
+    return meilleur
+
+
+def _url_de_collage(url: str) -> str:
+    """Adresse collée : un lien « Google Images » (…/imgres?imgurl=…) donne l'adresse de la photo elle-même."""
+    try:
+        p = urlparse(url)
+        if "google." in p.netloc and p.path.startswith("/imgres"):
+            from urllib.parse import parse_qs
+            vraie = (parse_qs(p.query).get("imgurl") or [""])[0]
+            if vraie:
+                return vraie
+    except ValueError:
+        pass
+    return url
+
+
+def image_depuis_adresse(url: str) -> Image.Image:
+    """Image depuis une adresse collée : adresse d'une image, lien Google Images, ou adresse d'une page produit
+    (la photo principale de la page est prise). La plus grande version disponible est gardée."""
+    url = _url_de_collage(url.strip())
+    if not _url_publique(url):
+        raise ValueError("adresse non autorisée")
+    try:
+        octets = telecharger_octets(url)
+        img = image_depuis_octets(octets)
+    except Exception as e:
+        # pas une image : peut-être la page d'un produit (on prend sa photo principale)
+        try:
+            html, url = _telecharger_page(url)
+        except Exception:
+            raise e
+        lecteur = _LecteurPage()
+        try:
+            lecteur.feed(html)
+        except Exception:
+            pass
+        noeuds = []
+        for bloc in lecteur.blocs_ld:
+            try:
+                _aplatir_ld(json.loads(bloc, strict=False), noeuds)
+            except ValueError:
+                continue
+        adresses = []
+        for n in noeuds:
+            if _est_produit(n):
+                adresses += _images_ld(n.get("image"))
+        adresses += [c for k, c in lecteur.metas if k in ("og:image", "og:image:secure_url", "twitter:image")]
+        adresses += lecteur.images_liees
+        for a in adresses:
+            a = urljoin(url, (a or "").strip())
+            if not a or IMAGE_A_IGNORER.search(a):
+                continue
+            try:
+                img = telecharger_image(a, referer=url)
+                url = a
+                break
+            except Exception:
+                continue
+        else:
+            raise ValueError("aucune photo trouvée à cette adresse")
+    try:
+        mieux = version_grande(url, img)
+        if mieux:
+            img = image_depuis_octets(mieux["octets"])
+    except Exception:
+        pass
+    return img
 
 
 def image_depuis_collage(valeur: dict) -> Image.Image:
-    """Image reçue du composant « coller une image » : fichier (données base64) ou adresse web."""
+    """Image reçue du composant « coller une image » : fichier (données base64), adresse d'une image, lien Google Images
+    ou adresse d'une page produit."""
     if not isinstance(valeur, dict):
         raise ValueError("rien reçu")
     donnees = valeur.get("donnees")
@@ -214,9 +436,18 @@ def image_depuis_collage(valeur: dict) -> Image.Image:
         octets = base64.b64decode(donnees)
         if len(octets) > MAX_IMAGE_OCTETS:
             raise ValueError("image trop volumineuse")
-        return image_depuis_octets(octets)
+        img = image_depuis_octets(octets)
+        source = str(valeur.get("source") or "").strip()  # adresse d'origine de l'image glissée, si le navigateur la donne
+        if source and _url_publique(source):
+            try:
+                mieux = version_grande(source, img)
+                if mieux:
+                    img = image_depuis_octets(mieux["octets"])
+            except Exception:
+                pass
+        return img
     if valeur.get("url"):
-        return telecharger_image(str(valeur["url"]).strip())
+        return image_depuis_adresse(str(valeur["url"]))
     raise ValueError("aucune image dans ce qui a été collé")
 
 
@@ -244,11 +475,18 @@ def rechercher(code: str):
         if img is not None:
             journal.append(f"Visuel repris de l'affiche enregistrée le {date_affiche} (historique).")
     marque, detail = "", ""
-    for source, modele in SOURCES:
+
+    def interroger(modele):  # les trois bases sont interrogées en même temps (avant : l'une après l'autre)
         try:
-            r = requests.get(modele.format(code=code), params={"fields": CHAMPS},
-                             headers=HEADERS, timeout=20)
+            return requests.get(modele.format(code=code), params={"fields": CHAMPS}, headers=HEADERS, timeout=(4, 10))
         except Exception as e:
+            return e
+
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
+        reponses = list(ex.map(interroger, [modele for _, modele in SOURCES]))
+    for (source, _modele), r in zip(SOURCES, reponses):
+        if isinstance(r, Exception):
+            e = r
             journal.append(f"{source} : connexion impossible ({type(e).__name__} : {str(e)[:120]}).")
             continue
         if r.status_code == 404:
@@ -282,8 +520,15 @@ def rechercher(code: str):
             journal.append(f"{source} : fiche trouvée, mais sans photo.")
             continue
         try:
-            img = rogner_marges_blanches(telecharger_image(url))
-            journal.append(f"{source} : visuel obtenu.")
+            img = telecharger_image(url)
+            try:  # la base donne une version réduite (400 px) : la photo d'origine est demandée
+                mieux = version_grande(url, img)
+                if mieux:
+                    img = image_depuis_octets(mieux["octets"])
+            except Exception:
+                pass
+            img = rogner_marges_blanches(img)
+            journal.append(f"{source} : visuel obtenu ({max(img.size)} px).")
         except Exception as e:
             journal.append(f"{source} : téléchargement du visuel impossible ({type(e).__name__}).")
 
@@ -841,6 +1086,15 @@ def _empreinte(img: Image.Image):
     return list(carre.resize((24, 24), Image.BILINEAR).getdata())
 
 
+def _empreinte_couleur(img: Image.Image):
+    """Empreinte en couleur (12×12, rouge, vert, bleu) : distingue deux produits de même forme mais de teinte
+    différente (même flacon, autre gamme), que l'empreinte en niveaux de gris peut confondre."""
+    cote = max(img.size)
+    carre = Image.new("RGB", (cote, cote), (255, 255, 255))
+    carre.paste(img.convert("RGB"), ((cote - img.width) // 2, (cote - img.height) // 2))
+    return [v for px in carre.resize((12, 12), Image.BILINEAR).getdata() for v in px]
+
+
 def _meme_image(a, b, seuil: float = 14.0) -> bool:
     """Deux empreintes proches (écart moyen sur 255 niveaux) : même photo."""
     return sum(abs(x - y) for x, y in zip(a, b)) / len(a) <= seuil
@@ -852,8 +1106,7 @@ def _evaluer_image(url, page, rang=0):
     Les dimensions retenues sont celles du produit lui-même, marges blanches retirées (comme à l'impression)."""
     try:
         octets = telecharger_octets(url, referer=page["url"], delai=(4, 12))
-        img = Image.open(io.BytesIO(octets))
-        img.load()
+        img = _ouvrir(octets)
     except Exception:
         return None
     rgb = vers_rgb_blanc(img)
@@ -862,14 +1115,45 @@ def _evaluer_image(url, page, rang=0):
     produit = rogner_marges_blanches(rgb)  # un petit flacon au milieu d'un grand fond blanc reste petit
     if min(produit.size) < 40:
         return None  # image vide ou presque
+    return _candidat(url, octets, rgb, produit, page, rang)
+
+
+def _candidat(url, octets, rgb, produit, page, rang=0):
     a = analyser_image(rgb)
     mini = rgb.copy()
     mini.thumbnail((320, 320))
-    return {"miniature": mini, "image": url, "octets": octets if len(octets) <= 1_500_000 else None,
+    return {"miniature": mini, "image": url, "octets": octets if len(octets) <= 2_500_000 else None,
             "titre": page.get("nom", ""), "site": page["site"], "page": page["url"],
-            "largeur": produit.width, "hauteur": produit.height, "blanc": a["blanc"], "studio": a["studio"],
+            "largeur": produit.width, "hauteur": produit.height, "nette": resolution_effective(produit),
+            "blanc": a["blanc"], "studio": a["studio"],
             "verifie": page["niveau"] != "nom", "niveau": page["niveau"], "sites": {page["site"]},
-            "principale": rang == 0, "_h": _empreinte(produit)}
+            "principale": rang == 0, "_h": _empreinte(produit), "_sources": [(url, page)]}
+
+
+_CHAMPS_PHOTO = ("miniature", "image", "octets", "page", "largeur", "hauteur", "nette", "blanc", "studio")
+
+
+def _agrandir_candidat(c):
+    """Plus grande version, réellement plus nette, de la photo d'un candidat, cherchée à partir de chacun des sites
+    où elle a été trouvée. Retourne les nouvelles valeurs (dict) ou None ; ne modifie pas le candidat (calcul fait
+    en parallèle, appliqué seulement s'il finit à temps)."""
+    nette, nouveau = c["nette"], None
+    for url, page in list(c["_sources"])[:3]:
+        try:
+            img = (_ouvrir(c["octets"]) if (c.get("octets") and url == c["image"])
+                   else telecharger_image(url, referer=page["url"]))
+            mieux = version_grande(url, img, referer=page["url"])
+        except Exception:
+            continue
+        if mieux and mieux["eff"] > nette * GAIN_MINI:
+            rgb = vers_rgb_blanc(_ouvrir(mieux["octets"]))
+            cand = _candidat(mieux["url"], mieux["octets"], rgb, mieux["img"], page)
+            nouveau = {k: cand[k] for k in _CHAMPS_PHOTO}
+            nouveau["agrandie"] = True
+            nette = cand["nette"]
+            if nette >= 1500:
+                break
+    return nouveau
 
 
 def _candidats_de_pages(pages, maxi=30):
@@ -896,31 +1180,54 @@ def _candidats_de_pages(pages, maxi=30):
                 c = None
             if c:
                 candidats.append(c)
-    # même photo sur plusieurs sites : on garde la version où le produit est le plus grand (fond blanc d'abord) ;
-    # les versions trop petites comptent quand même comme sites où la photo figure
-    candidats.sort(key=lambda c: (-max(c["largeur"], c["hauteur"]) - 400 * c["studio"]))
+    # même photo sur plusieurs sites : on garde la version la plus nette (résolution réelle, fond blanc d'abord) ;
+    # les versions plus petites comptent quand même comme sites où la photo figure, et servent à chercher plus grand
+    candidats.sort(key=lambda c: (-c["nette"] - 400 * c["studio"]))
     uniques = []
     for c in candidats:
         for u in uniques:
             if _meme_image(u["_h"], c["_h"]):
                 u["sites"] |= c["sites"]
+                u["_sources"] += c["_sources"]
                 u["principale"] = u["principale"] or c["principale"]
                 if RANG_NIVEAU[c["niveau"]] > RANG_NIVEAU[u["niveau"]]:
                     u["niveau"] = c["niveau"]
                 break
         else:
             uniques.append(c)
+
+    def noter(c):
+        resolution = min(1.0, c["nette"] / 1000)  # grand côté réellement net : un flacon fin reste net
+        confiance = {"fort": 25, "moyen": 15, "nom": 0}.get(c["niveau"], 0)
+        c["score"] = (100 * c["blanc"] + 45 * resolution + confiance + 25 * min(1.0, (len(c["sites"]) - 1) / 2)
+                      + (20 if c["principale"] else 0)  # photo principale d'une page, plutôt qu'une photo de galerie
+                      - (60 if c["niveau"] == "nom" else 0))
+
+    for c in uniques:
+        noter(c)
+    uniques.sort(key=lambda c: -c["score"])
+    # les meilleures photos encore modestes (moins de 1 500 px réels) : on cherche leur version d'origine, en grand
+    a_agrandir = [c for c in uniques[:8] if c["nette"] < 1500]
+    if a_agrandir:
+        ex = ThreadPoolExecutor(max_workers=8)
+        futures = {ex.submit(_agrandir_candidat, c): c for c in a_agrandir}
+        faits, _ = wait(list(futures), timeout=DELAI_AGRANDIR)
+        ex.shutdown(wait=False, cancel_futures=True)
+        for f in faits:
+            try:
+                nouveau = f.result()
+            except Exception:
+                nouveau = None
+            if nouveau:
+                futures[f].update(nouveau)
+                noter(futures[f])
     uniques = [c for c in uniques if max(c["largeur"], c["hauteur"]) >= MIN_COTE_VERIFIE]
     for c in uniques:
         c["verifie"] = c["niveau"] != "nom"
         c["nb_sites"] = len(c["sites"])
         c["sites"] = sorted(c["sites"])
-        resolution = min(1.0, max(c["largeur"], c["hauteur"]) / 1000)  # grand côté : un flacon fin reste net
-        confiance = {"fort": 25, "moyen": 15, "nom": 0}.get(c["niveau"], 0)
-        c["score"] = (100 * c["blanc"] + 40 * resolution + confiance + 25 * min(1.0, (c["nb_sites"] - 1) / 2)
-                      + (20 if c["principale"] else 0)  # photo principale d'une page, plutôt qu'une photo de galerie
-                      - (60 if c["niveau"] == "nom" else 0))
-        del c["_h"]
+        c.pop("_h", None)
+        c.pop("_sources", None)
     uniques.sort(key=lambda c: -c["score"])
     return uniques
 
