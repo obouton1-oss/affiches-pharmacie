@@ -366,7 +366,7 @@ function champTexte(t){
 }
 
 // ---------------------------------------------------------------- barre de réglages
-let compact = false;
+let compact = 0;   // place comptée : 1 = police réduite à « Aa », 2 = taille −/+ dans le menu « ⋯ » (gras, italique, souligné restent toujours visibles)
 function deborde(){   // les outils tiennent-ils sur une seule ligne ?
   const b = [...outilsEl.children].filter(n => n.offsetWidth);
   return b.length > 1 && b[b.length - 1].offsetTop > b[0].offsetTop + 4;
@@ -448,17 +448,19 @@ function construireBarre(){
   }
   // police et style du texte
   if(o.styles){
-    const s = stylesActifs(o.styles), nomPolice = o.styles.police || args.police_affiche, enMenu = compact;
-    outilsEl.appendChild(bouton('<span class="nomp" style="font-family:' + esc(famille(nomPolice)) + '">' + esc(nomPolice) + '</span>' + ico("fleche", 14),
-      "Police de ce texte", b => ouvrirPop(b, menuPolices(o.styles.police, true, v => maj("police", v), o,
-                                                           enMenu ? s : null)), "bord police"));
-    if(!enMenu) for(const [k, lettre, cls, titre] of [["gras","B","b","Gras"],["italique","I","i","Italique"],["souligne","U","u","Souligné"]]){
+    const s = stylesActifs(o.styles), nomPolice = o.styles.police || args.police_affiche;
+    const libPolice = compact >= 1 ? "Aa" : esc(nomPolice);
+    outilsEl.appendChild(bouton('<span class="nomp" style="font-family:' + esc(famille(nomPolice)) + '">' + libPolice + '</span>' + ico("fleche", 14),
+      "Police de ce texte (" + nomPolice + ")", b => ouvrirPop(b, menuPolices(o.styles.police, true, v => maj("police", v), o, null)),
+      "bord police"));
+    for(const [k, lettre, cls, titre] of [["gras","B","b","Gras"],["italique","I","i","Italique"],["souligne","U","u","Souligné"]]){
       outilsEl.appendChild(bouton('<span class="' + cls + '">' + lettre + '</span>', titre, b => {
         s[k] = !s[k]; b.classList.toggle("on", s[k]); maj("style", Object.assign({}, s));
       }, s[k] ? "on" : ""));
     }
   }
-  if(o.taille){
+  const tailleDansMenu = compact >= 2;
+  if(o.taille && !tailleDansMenu){
     outilsEl.appendChild(el("span", "sep"));
     outilsEl.appendChild(bouton(ico("moins"), "Plus petit (touche −)", () => envoyer({action:"taille", el: actif, facteur: 1/1.1})));
     outilsEl.appendChild(bouton(ico("plus"), "Plus grand (touche +)", () => envoyer({action:"taille", el: actif, facteur: 1.1})));
@@ -471,6 +473,11 @@ function construireBarre(){
   outilsEl.appendChild(el("span", "pousse"));
   outilsEl.appendChild(bouton(ico("points", 18), "Plus d'actions", b => {
     const box = el("div"), a = o.actions || [];
+    if(o.taille && tailleDansMenu){
+      box.appendChild(item("plus", "Plus grand", () => envoyer({action:"taille", el: actif, facteur: 1.1}), "", "+"));
+      box.appendChild(item("moins", "Plus petit", () => envoyer({action:"taille", el: actif, facteur: 1/1.1}), "", "−"));
+      box.appendChild(el("div", "pop-sep"));
+    }
     if(o.libre){
       box.appendChild(item(o.devant ? "derriere" : "devant", o.devant ? "Passer derrière le visuel" : "Passer devant le visuel", () => maj("devant", !o.devant)));
       box.appendChild(item("gauche", "Tourner à gauche (15°)", () => envoyer({action:"tourner", el: actif, angle: -15})));
@@ -486,7 +493,7 @@ function construireBarre(){
                                           + " · Double-clic sur un texte : le modifier"));
     ouvrirPop(b, box);
   }));
-  if(!compact && o.styles && deborde()){ compact = true; signature = ""; construireBarre(); compact = false; return; }
+  if(compact < 2 && deborde()){ compact += 1; signature = ""; construireBarre(); compact = 0; return; }
   hauteur(); construire();
   if(focusApres && focusApres === actif) focaliserTexte();
 }
