@@ -38,7 +38,7 @@ _CSS = """
 }
 /* Page */
 .stApp{background:linear-gradient(180deg,#F8F9FC 0,#F2F4F8 100%) fixed}
-[data-testid="stHeader"]{background:rgba(244,245,248,.88);backdrop-filter:blur(6px)}
+[data-testid="stHeader"]{background:#F7F8FB;border-bottom:1px solid rgba(221,225,232,.6)}
 [data-testid="stMainBlockContainer"]{max-width:1640px;padding-top:4.2rem;padding-bottom:.75rem}
 /* marge sous le formulaire : donne à la colonne d'aperçu la place de rester entièrement visible en bas de page */
 [data-testid="stColumn"]:has(.st-key-etape_1){padding-bottom:3.5rem}
@@ -119,7 +119,7 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 .st-key-raccourcis_dates p{margin:0}
 
 /* Types d'affiche (barre en haut de « Créer une affiche ») */
-.st-key-barre_types{background:#fff;border:1px solid var(--bord-doux);border-radius:14px;padding:.55rem 1rem .35rem;
+.st-key-barre_types{background:#fff;border:1px solid var(--bord-doux);border-radius:14px;padding:.6rem 1rem .75rem;gap:.3rem;
   box-shadow:var(--ombre);margin-bottom:.5rem}
 .st-key-barre_types [data-testid="stPills"] button{border-radius:999px}
 .st-key-barre_types [data-testid="stCaptionContainer"] p{margin:0}
@@ -164,10 +164,13 @@ AIDE_MARKDOWN = """
 **Pour créer une affiche**
 1. **Chercher le produit** par son nom ou son code CIP13 / EAN : l'outil cherche le visuel (à vérifier).
 2. **Saisir le prix promo** (7,90 ou 7.9). Prix barré et dates sont facultatifs ; des raccourcis proposent « Ce mois-ci » ou « Mois prochain ».
-3. **Vérifier l'aperçu** à droite. La marque, le prix ou la photo se déplacent en les faisant glisser.
+3. **Retoucher sur l'aperçu**, à droite : un clic sur un élément (marque, prix, photo…) affiche ses réglages juste au-dessus de l'affiche : texte, couleur, police, gras, italique, souligné, taille. On le fait glisser pour le déplacer ; il « colle » au centre de l'affiche (trait rouge).
 4. **Télécharger le PDF** : l'affiche est aussi gardée dans l'historique.
 
 **Astuces**
+- **Annuler** une retouche : flèche ↶ au-dessus de l'aperçu (ou Ctrl + Z après un clic sur l'affiche) ; ↷ pour rétablir.
+- **Au clavier**, après un clic sur un élément : flèches pour le déplacer finement (Maj + flèche : plus vite), + / − pour la taille, Suppr pour retirer un élément ajouté, Ctrl + D pour le dupliquer, Échap pour désélectionner. Un double-clic sur un texte permet de l'écrire directement.
+- Sans élément sélectionné, la barre au-dessus de l'aperçu ajoute un texte, un prix ou une forme, et change la police ou le thème de couleurs de toute l'affiche.
 - Pas de visuel ? Copier une image sur le web, cliquer dans le cadre « Coller une image » et coller (Ctrl + V, ou ⌘ + V sur Mac).
 - **Enregistrer et passer à la suivante** prépare l'affiche d'après : produit et prix repartent à zéro, le format, le style et les dates sont gardés.
 - **Reprendre une affiche récente** (sous la recherche) rouvre une affiche déjà faite pour la modifier.
@@ -225,7 +228,7 @@ def premiers_pas():
     """Les quatre gestes de base (affichés tant que la pharmacie n'a pas cliqué sur « J'ai compris »)."""
     pas = (("Cherchez le produit", "Par son nom ou son code CIP13\u00a0/\u00a0EAN, l'outil cherche le visuel (à vérifier)."),
            ("Saisissez le prix", "Prix promo, prix barré et dates si besoin. Des raccourcis proposent les dates du mois."),
-           ("Vérifiez l'aperçu", "À droite. Marque, prix et photo se déplacent en les faisant glisser."),
+           ("Retouchez l'aperçu", "À droite : un clic sur un élément pour changer son texte, sa couleur ou sa police ; glisser pour le déplacer."),
            ("Téléchargez le PDF", "Il est aussi gardé dans l'historique. «\u00a0Passer à la suivante\u00a0» prépare l'affiche d'après."))
     cases = "".join(f'<div><span class="n">{i}</span><div><b>{escape(t)}</b><span class="t">{escape(d)}</span></div></div>'
                     for i, (t, d) in enumerate(pas, 1))

@@ -29,6 +29,7 @@ import mise_en_route
 import planche
 import promos
 import reimpression
+import retouches
 import sauvegarde
 import nettete
 import nettoyage
@@ -190,6 +191,12 @@ SEUIL_NETTETE = 700  # en dessous (côté le plus court, en pixels), la netteté
 
 
 ss.setdefault("w_police", ss.style["police"])
+ss.setdefault("selection_apercu", False)  # un élément de l'aperçu est choisi (sa barre de réglages est affichée)
+
+# Retouches faites directement sur l'aperçu (barre de réglages, glisser, clavier, annuler) : appliquées ici, avant que
+# les champs du formulaire ne soient dessinés, pour qu'ils affichent tout de suite les nouvelles valeurs
+retouches.noter(ss)
+retouches.appliquer(ss, ss.get("editeur"))
 
 
 def maj_style(cle, cle_widget):
@@ -261,7 +268,7 @@ def ajouter_element(type_):
         return
     e = libres.nouveau(type_, ss.style)
     ss.elements = ss.elements + [e]
-    ss.element_libre_actif, ss.selection_libre = e["id"], True
+    ss.element_libre_actif, ss.selection_libre, ss.selection_apercu = e["id"], True, True
     ss.ver += 1
 
 
@@ -294,6 +301,7 @@ def supprimer_element(ident):
     ss.elements = restants
     ss.element_libre_actif = (restants[min(ids.index(ident), len(restants) - 1)]["id"] if restants else None)
     ss.selection_libre = bool(restants) and ss.selection_libre
+    ss.selection_apercu = ss.selection_apercu and ss.selection_libre
     ss.ver += 1
 
 
@@ -305,7 +313,7 @@ def dupliquer_element(ident):
         return
     copie = libres.dupliquer(e)
     ss.elements = ss.elements + [copie]
-    ss.element_libre_actif, ss.selection_libre = copie["id"], True
+    ss.element_libre_actif, ss.selection_libre, ss.selection_apercu = copie["id"], True, True
     ss.ver += 1
 
 
@@ -313,11 +321,12 @@ def choisir_libre(cle_widget, ids):
     """Un élément ajouté est choisi dans la liste (le choix est gardé à part, car le libellé de chaque élément change
     avec son texte, et Streamlit recrée alors la liste)."""
     ss.element_libre_actif = ids[ss[cle_widget]] if ss[cle_widget] in ids else ss.element_libre_actif
-    ss.selection_libre = True
+    ss.selection_libre = ss.selection_apercu = True
 
 
 def choisir_standard():
     ss.selection_libre = False
+    ss.selection_apercu = True
 
 
 def maj_slider(el, champ):
@@ -502,6 +511,8 @@ def rouvrir(ident):
         ss.type_actif = ss.w_type = ident_type
     ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = False, "Désactivée", True
     ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
+    ss.selection_apercu = False
+    retouches.oublier(ss)  # « Annuler » ne ramène pas à l'affiche d'avant
     ss.msg_ouvert = ("Affiche rouverte : modifier ce qui doit l'être, puis télécharger le PDF ou "
                      "l'enregistrer à nouveau.")
     if ONGLETS_PILOTABLES:
@@ -728,6 +739,8 @@ def nouvelle_affiche(garder_serie=False):
     if not garder_serie:  # d'une affiche à la suivante d'une série, les éléments ajoutés (« NOUVEAU »…) restent
         ss.elements, ss.element_libre_actif, ss.selection_libre = [], None, False
     ss.selection_libre = ss.selection_libre and bool(ss.elements)
+    ss.selection_apercu = False
+    retouches.oublier(ss)
     ss.ver += 1
     ss.msg_ouvert = ("Nouvelle affiche : le formulaire est vide. Le format, la police, les couleurs et le logo "
                      "sont conservés.")
@@ -1002,7 +1015,7 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
     return finaux
 
 
-RESERVE_APERCU = 322  # hauteur (px) occupée autour de l'affiche dans la colonne d'aperçu : marges, aide, boutons
+RESERVE_APERCU = 250  # hauteur (px) occupée autour de l'affiche dans la colonne d'aperçu : marges, boutons (la barre de réglages est comptée par l'aperçu)
 
 
 def _manquants(nom, resultat_promo, rappels, prix, prix_txt):
@@ -1177,7 +1190,8 @@ with col_form:
             slot_options = st.container()  # case « Nettoyage IA », visible d'office sous le visuel
             slot_props = st.container()    # propositions de visuels (remplies après la recherche web éventuelle)
 
-            with st.expander("Autre visuel : chercher, coller ou importer une image", expanded=ss.image is None):
+            with st.expander("Autre visuel : chercher, coller ou importer une image", expanded=ss.image is None,
+                             icon=":material/image_search:"):
                 if code_net:
                     bt1, bt2 = st.columns(2)
                     if bt1.button("Relancer la recherche sur les sites marchands", use_container_width=True):
@@ -1282,7 +1296,7 @@ with col_form:
                     nettoyer_on = bool(ss.w_nettoyer)
 
             # --- Réglages du visuel (repliés : la plupart du temps, les valeurs par défaut suffisent)
-            with st.expander("Réglages du visuel : recadrage, netteté"):
+            with st.expander("Réglages du visuel : recadrage, netteté", icon=":material/crop:"):
                 st.markdown("**Recadrage** (retirer un nom de site, un bord…)")
                 r1, r2 = st.columns(2)
                 rg = r1.slider("Rogner à gauche (%)", 0, 40, key="w_rg")
@@ -1436,8 +1450,8 @@ with col_form:
 
     # ------------------------------------------------------------------ Étape 3 : mise en page
     with st.container(key="etape_3"):
-        habillage.titre_etape(3, "Mise en page", "Format, logo, police et couleurs. Les éléments se déplacent "
-                                                 "aussi sur l'aperçu.")
+        habillage.titre_etape(3, "Mise en page", "Format, logo, police et couleurs. Astuce : un clic sur un élément de "
+                                                 "l'aperçu affiche ses réglages (texte, couleur, police), juste au-dessus.")
         f1, f2 = st.columns([2, 3], vertical_alignment="bottom")
         choix = f1.selectbox("Format", list(FORMATS) + ["Personnalisé"], key="w_format")
         if choix == "Personnalisé":
@@ -1461,7 +1475,7 @@ with col_form:
                     help="Décocher pour une affiche sans image (par exemple une petite affiche de rayon) : la recherche "
                          "de photo est alors ignorée.")
 
-        with st.expander("Police et couleurs"):
+        with st.expander("Police et couleurs", icon=":material/palette:"):
             st.selectbox("Police de l'affiche (celle de tous les textes, sauf choix contraire plus bas)", POLICES,
                          key="w_police", on_change=maj_style, args=("police", "w_police"))
             st.selectbox("Thème de couleurs", ["— choisir un thème —"] + list(THEMES), key="theme_choisi",
@@ -1497,7 +1511,8 @@ with col_form:
                        "pour la suite.")
 
         with st.expander("Cadre (en option)" + ("" if ss.style.get("cadre", "aucun") == "aucun"
-                                                 else f" : {CADRES.get(ss.style.get('cadre'), '')}")):
+                                                 else f" : {CADRES.get(ss.style.get('cadre'), '')}"),
+                         icon=":material/crop_square:"):
             k1, k2 = st.columns([3, 2], vertical_alignment="bottom")
             ckc = f"cadre_{ss.ver}"
             k1.selectbox("Style du cadre", list(CADRES), format_func=CADRES.get, key=ckc,
@@ -1525,7 +1540,7 @@ with col_form:
             en_planche = i2.checkbox(f"{par_feuille} affiches par feuille A4", value=True)
         slot_feuille = st.container()  # « Feuille d'impression » (remplie quand l'aperçu est affiché)
 
-    with st.expander(f"Catalogue produits ({len(cat)} produit(s))"):
+    with st.expander(f"Catalogue produits ({len(cat)} produit(s))", icon=":material/inventory_2:"):
         st.caption("Les produits des affiches téléchargées sont mémorisés avec leur marque. Un export du logiciel "
                    "de pharmacie (CSV : colonnes code ; nom, et marque si possible) peut aussi être importé : "
                    "il remplace l'export précédent et n'efface pas les produits mémorisés.")
@@ -1593,34 +1608,29 @@ with col_apercu:
             largeur_px = 900
             png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
             noms_editeur = {**ELEMENTS, **{f"libre_{e['id']}": html.escape(libres.nom(e)) for e in ss.elements}}
-            actif_editeur = (f"libre_{ss.element_libre_actif}" if ss.selection_libre and ss.element_libre_actif
-                             else ss.element_actif)
-            ev = editeur_affiche(image="data:image/png;base64," + base64.b64encode(png).decode(),
-                                 cadres=cadres, noms=noms_editeur, ratio=taille[1] / taille[0],
-                                 actif=actif_editeur, reserve=RESERVE_APERCU + (0 if visuel is not None or not avec_photo else 62),
-                                 key="editeur", default=None)  # sans visuel : un avertissement s'ajoute au-dessus de l'affiche
-            if ev and ev.get("ts") != ss.dernier_ev:
-                ss.dernier_ev = ev["ts"]
-                el = ev.get("el")
-                if el in ELEMENTS:
-                    ss.element_actif = el
-                    ss.selection_libre = False
-                    if not ev.get("clic"):
-                        g = ss.reglages[el]
-                        g["dx"] += float(ev.get("ddx", 0))
-                        g["dy"] -= float(ev.get("ddy", 0))
-                        g["s"] = min(4.0, max(0.2, g["s"] * float(ev.get("ds", 1))))
-                        ss.ver += 1
-                    st.rerun()
-                elif isinstance(el, str) and el.startswith("libre_") and _trouver_element(el[6:]) is not None:
-                    ident = el[6:]  # élément ajouté à la main : choisi par un clic, déplacé ou agrandi en le tirant
-                    ss.element_libre_actif, ss.selection_libre = ident, True
-                    if not ev.get("clic"):
-                        ss.elements = [libres.deplacer(x, float(ev.get("ddx", 0)), float(ev.get("ddy", 0)),
-                                                       float(ev.get("ds", 1))) if x["id"] == ident else x
-                                       for x in ss.elements]
-                        ss.ver += 1
-                    st.rerun()
+            if logo_marque_img is not None:
+                noms_editeur["marque"] = "Logo de la marque"
+            actif_editeur = None
+            if ss.selection_apercu:
+                actif_editeur = (f"libre_{ss.element_libre_actif}" if ss.selection_libre and ss.element_libre_actif
+                                 else ss.element_actif)
+                if actif_editeur not in cadres:
+                    actif_editeur = None
+            retouches.noter(ss)  # modifications faites dans le formulaire pendant cette exécution
+            # Les clics, déplacements et réglages faits sur l'aperçu sont appliqués au début de l'exécution suivante
+            # (voir retouches.appliquer)
+            editeur_affiche(image="data:image/png;base64," + base64.b64encode(png).decode(),
+                            cadres=cadres, noms=noms_editeur, ratio=taille[1] / taille[0], actif=actif_editeur,
+                            outils=retouches.outils(ss, cadres, standard=type_promo == promos.STANDARD,
+                                                    logo_marque=logo_marque_img is not None),
+                            polices=POLICES, police_affiche=ss.style["police"], themes=list(THEMES),
+                            couleurs=retouches.couleurs_affiche(ss),
+                            formes={k: v[0] for k, v in libres.FORMES.items()},
+                            plein=len(ss.elements) >= libres.MAX_ELEMENTS,
+                            annuler=retouches.peut_annuler(ss), retablir=retouches.peut_retablir(ss),
+                            traites=retouches.traites(ss),
+                            reserve=RESERVE_APERCU + (0 if visuel is not None or not avec_photo else 62),
+                            key="editeur", default=None)  # sans visuel : un avertissement s'ajoute au-dessus de l'affiche
 
             def memoriser_affiche():
                 """Mémorise le produit (proposé directement la fois suivante, avec sa marque) et enregistre l'affiche
@@ -1639,11 +1649,13 @@ with col_apercu:
                                   icon=":material/download:"):
                 memoriser_affiche()  # l'affiche téléchargée est aussi conservée dans l'historique
                 st.toast("Affiche enregistrée dans l'historique.", icon=":material/check_circle:")
-            h1, h2 = st.columns(2)
-            if h1.button("Enregistrer dans l'historique", use_container_width=True):
+            h1, h2, h3 = st.columns(3)
+            if h1.button("Enregistrer", key="enreg_hist", icon=":material/bookmark_add:", use_container_width=True,
+                         help="Enregistrer l'affiche dans l'historique"):
                 memoriser_affiche()
                 st.toast("Affiche enregistrée dans l'historique.", icon=":material/check_circle:")
-            if h2.button("Enregistrer et ajouter à la page A4 regroupée", use_container_width=True):
+            if h2.button("Page A4", key="enreg_page", icon=":material/library_add:", use_container_width=True,
+                         help="Enregistrer l'affiche et l'ajouter à la page A4 regroupée"):
                 ajouter_regroupe(memoriser_affiche())
                 st.toast("Affiche enregistrée et ajoutée à la page A4 regroupée (onglet « Page A4 regroupée »).",
                          icon=":material/check_circle:")
@@ -1653,15 +1665,16 @@ with col_apercu:
                 memoriser_affiche()
                 nouvelle_affiche(garder_serie=True)
 
-            st.button("Enregistrer et passer à la suivante", key="passer_suivante", on_click=enregistrer_puis_suivante,
+            h3.button("Suivante", key="passer_suivante", on_click=enregistrer_puis_suivante,
                       icon=":material/skip_next:", use_container_width=True,
-                      help="Enregistre cette affiche dans l'historique, puis efface le produit et le prix. "
+                      help="Enregistrer et passer à la suivante : l'affiche est enregistrée dans l'historique, puis le "
+                           "produit et le prix sont effacés. "
                            "Le format, le style, le type de promotion, les dates et les éléments ajoutés sont conservés.")
             apercu_affiche = True
 
 # Éléments ajoutés à la main : texte, prix ou forme, de la couleur voulue, derrière (par défaut) ou devant le visuel
 with slot_elements:
-    with st.expander("Ajouter un texte, un prix ou une forme"):
+    with st.expander("Ajouter un texte, un prix ou une forme", icon=":material/add_box:"):
         st.caption("Un texte, un prix ou une forme (carré, rond, flèche, étoile…) à poser sur l'affiche : on choisit sa "
                    "couleur, et s'il passe derrière le visuel (par défaut) ou devant. Il se déplace ensuite sur l'aperçu, "
                    "comme les autres éléments.")
@@ -1745,7 +1758,7 @@ with slot_elements:
 # Réglages qui dépendent de l'aperçu : placés dans le formulaire (étapes 3 et 4), à côté de l'aperçu qui reste visible
 with slot_reglages:
     if apercu_affiche:
-        with st.expander("Réglages précis", expanded=False):
+        with st.expander("Réglages précis", expanded=False, icon=":material/tune:"):
             st.caption("Pour déplacer ou agrandir un élément, le plus simple est de le faire glisser sur l'aperçu. "
                        "Ces réglages servent aux ajustements fins.")
             dispo = [e for e in ELEMENTS if e in cadres]
@@ -1768,7 +1781,7 @@ with slot_reglages:
 
 with slot_feuille:
     if apercu_affiche:
-        with st.expander("Feuille d'impression"):
+        with st.expander("Feuille d'impression", icon=":material/print:"):
             st.image(apercu_png(final), use_container_width=True)
             st.caption(f"{exemplaires} affiche(s) → {feuilles} "
                        f"{'feuille(s) A4' if par > 1 else f'page(s) {format_txt}'}"
