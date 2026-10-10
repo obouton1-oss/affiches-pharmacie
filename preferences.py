@@ -47,6 +47,7 @@ def charger_style(dossier: Path) -> dict:
         pass
     if st_["police"] not in af.POLICES:
         st_["police"] = af.STYLE_DEFAUT["police"]
+    st_["textes"] = af.textes_valides(st_.get("textes"))  # police et style propres à chaque texte
     return st_
 
 

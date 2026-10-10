@@ -150,6 +150,8 @@ h1{font-size:1.55rem !important;font-weight:700 !important;letter-spacing:-.01em
 .hab-connexion .sous{color:var(--muet);margin-top:.25rem}
 .hab-connexion-pied{text-align:center;color:var(--muet);font-size:.85rem;margin-top:.9rem}
 
+.st-key-apercu_polices{position:absolute;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
+
 @media (max-width:699px){
   .st-key-apercu_fixe,.st-key-mer_apercu{max-height:none;overflow-y:visible}
 }

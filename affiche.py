@@ -13,6 +13,7 @@ visuels) occupe la colonne de gauche, les textes, le prix et le logo la colonne 
 Une page en portrait garde la mise en page d'origine (de haut en bas, comme ci-dessus).
 """
 import io
+import math
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -72,12 +73,53 @@ STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix":
                 "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
                 "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848",
                 # couleur du détail du produit : vide = la même que la marque (cas d'origine, et des affiches déjà faites)
-                "couleur_detail": None}
+                "couleur_detail": None,
+                # police, gras, italique et souligné propres à chaque texte (voir TEXTES) ; vide = tout comme avant
+                "textes": {}}
 
 
 def couleur_detail(st) -> str:
     """Couleur (hexadécimale) du détail du produit : celle de la marque tant qu'aucune autre n'est choisie."""
     return st.get("couleur_detail") or st["couleur_nom"]
+
+
+# Textes de l'affiche dont la police, le gras, l'italique et le souligné se choisissent un par un : (libellé, gras d'origine).
+# style["textes"] = {texte: {"police": famille, "gras": bool, "italique": True, "souligne": True}} ; seuls les choix qui
+# diffèrent de l'origine y figurent (police absente = celle de l'affiche).
+TEXTES = {"marque": ("Marque", True), "detail": ("Détail du produit", False), "prix": ("Prix", True),
+          "prix_barre": ("Prix barré", False), "ligne": ("Texte sous le prix", False), "dates": ("Dates", False)}
+ANGLE_ITALIQUE = 12  # degrés : l'inclinaison de l'Helvetica penchée, appliquée à toutes les polices
+_TAN_ITALIQUE = math.tan(math.radians(ANGLE_ITALIQUE))
+
+
+def textes_valides(brut) -> dict:
+    """Les choix de police et de style de texte reconnus, ramenés à leur forme minimale (ce qui diffère de l'origine)."""
+    res = {}
+    if not isinstance(brut, dict):
+        return res
+    for texte, (_, gras_origine) in TEXTES.items():
+        r = brut.get(texte)
+        if not isinstance(r, dict):
+            continue
+        v = {}
+        if isinstance(r.get("police"), str) and r["police"] in POLICES:
+            v["police"] = r["police"]
+        if "gras" in r and bool(r["gras"]) != gras_origine:
+            v["gras"] = bool(r["gras"])
+        if r.get("italique"):
+            v["italique"] = True
+        if r.get("souligne"):
+            v["souligne"] = True
+        if v:
+            res[texte] = v
+    return res
+
+
+def police_texte(st, texte):
+    """(nom de police reportlab, italique, souligné) du texte `texte` de l'affiche, d'après le style."""
+    r = textes_valides(st.get("textes")).get(texte, {})
+    reg, bold = polices_famille(r.get("police") or st["police"])
+    return (bold if r.get("gras", TEXTES[texte][1]) else reg), bool(r.get("italique")), bool(r.get("souligne"))
 
 
 # Cadre autour de l'affiche : en option seulement (aucun par défaut)
@@ -229,11 +271,50 @@ def _largeur_prix(p, taille, gras=GRAS):
                   stringWidth("€", gras, taille * 0.42)))
 
 
-def _dessiner_prix(c, p, cx, base_y, taille, gras=GRAS, couleur=VERT, hc=0.72):
+def _incliner(c, cx, base, italique):
+    """Texte en italique : ouvre un état graphique penché autour du point (cx, base) et retourne le nouveau point
+    (0, 0), à fermer avec _fin_inclinaison. Sans italique, ne fait rien et retourne le point tel quel."""
+    if not italique:
+        return cx, base, False
+    c.saveState()
+    c.translate(cx, base)
+    c.transform(1, 0, _TAN_ITALIQUE, 1, 0, 0)
+    return 0.0, 0.0, True
+
+
+def _fin_inclinaison(c, ouvert):
+    if ouvert:
+        c.restoreState()
+
+
+def _souligner(c, x0, x1, base, taille, couleur):
+    """Trait sous le texte posé sur la ligne de base `base`, de la couleur du texte."""
+    c.saveState()
+    c.setStrokeColor(couleur)
+    c.setLineWidth(max(0.5, taille * 0.06))
+    c.setLineCap(0)
+    c.line(x0, base - taille * 0.13, x1, base - taille * 0.13)
+    c.restoreState()
+
+
+def _ecrire_centre(c, texte, cx, base, police, taille, couleur, italique=False, souligne=False):
+    """Une ligne de texte centrée en cx, sur la ligne de base `base`."""
+    c.setFillColor(couleur)
+    c.setFont(police, taille)
+    x, b, ouvert = _incliner(c, cx, base, italique)
+    c.drawCentredString(x, b, texte)
+    if souligne:
+        moitie = stringWidth(texte, police, taille) / 2
+        _souligner(c, x - moitie, x + moitie, b, taille, couleur)
+    _fin_inclinaison(c, ouvert)
+
+
+def _dessiner_prix(c, p, cx, base_y, taille, gras=GRAS, couleur=VERT, hc=0.72, italique=False, souligne=False):
     ent, cts = _prix_parts(p)
     w = _largeur_prix(p, taille, gras)
-    x = cx - w / 2
     c.setFillColor(couleur)
+    cx, base_y, ouvert = _incliner(c, cx, base_y, italique)
+    x = cx - w / 2
     c.setFont(gras, taille)
     c.drawString(x, base_y, ent)
     x2 = x + stringWidth(ent, gras, taille) + taille * 0.08
@@ -245,6 +326,9 @@ def _dessiner_prix(c, p, cx, base_y, taille, gras=GRAS, couleur=VERT, hc=0.72):
         c.drawString(x2, base_y, cts)
     else:
         c.drawString(x2, base_y + cap - petit * hc, "€")
+    if souligne:
+        _souligner(c, x, x + w, base_y, taille, couleur)
+    _fin_inclinaison(c, ouvert)
 
 
 # ----------------------------------------------------------------------------
@@ -273,15 +357,20 @@ def _largeur_texte(texte, police, taille):
     return sum(stringWidth(t, police, taille * (SUP_TAILLE if sup else 1)) for t, sup in _segments(texte))
 
 
-def _dessiner_texte(c, texte, cx, base, taille, police, couleur, hc=0.72):
+def _dessiner_texte(c, texte, cx, base, taille, police, couleur, hc=0.72, italique=False, souligne=False):
     """Texte centré en cx, sur la ligne de base `base` ; ^{e} = exposant."""
-    x = cx - _largeur_texte(texte, police, taille) / 2
+    largeur = _largeur_texte(texte, police, taille)
     c.setFillColor(couleur)
+    cx, base, ouvert = _incliner(c, cx, base, italique)
+    x = cx - largeur / 2
     for t, sup in _segments(texte):
         corps = taille * (SUP_TAILLE if sup else 1)
         c.setFont(police, corps)
         c.drawString(x, base + (taille * hc * 0.36 if sup else 0), t)
         x += stringWidth(t, police, corps)
+    if souligne:
+        _souligner(c, cx - largeur / 2, cx + largeur / 2, base, taille, couleur)
+    _fin_inclinaison(c, ouvert)
 
 
 def _largeur_grand(prix, grand, taille, gras):
@@ -304,14 +393,15 @@ def _facteur_bandeau(grand, kicker):
     return 0.88 if grand else 1.0
 
 
-def _dessiner_bandeau(c, prix, grand, kicker, cx, base, taille, gras, couleur, hc):
+def _dessiner_bandeau(c, prix, grand, kicker, cx, base, taille, gras, couleur, hc, italique=False, souligne=False):
     """Contenu du bandeau : prix (ou texte principal) sur la ligne de base `base`, petit texte au-dessus."""
     if grand:
-        _dessiner_texte(c, grand, cx, base, taille, gras, couleur, hc)
+        _dessiner_texte(c, grand, cx, base, taille, gras, couleur, hc, italique, souligne)
     else:
-        _dessiner_prix(c, prix, cx, base, taille, gras, couleur, hc)
+        _dessiner_prix(c, prix, cx, base, taille, gras, couleur, hc, italique, souligne)
     if kicker:
-        _dessiner_texte(c, kicker, cx, base + hc * taille + K_ECART * taille, taille * K_TAILLE, gras, couleur, hc)
+        _dessiner_texte(c, kicker, cx, base + hc * taille + K_ECART * taille, taille * K_TAILLE, gras, couleur, hc,
+                        italique, souligne)
 
 
 def _pastille(c, texte, cx, cy, rayon, gras, couleur_fond, couleur_texte):
@@ -441,6 +531,34 @@ def _dessiner_cadre(c, W, H, S, cadre, couleur):
     c.restoreState()
 
 
+def _libres():
+    """Module des éléments libres (importé à la demande : il importe lui-même ce module)."""
+    import elements_libres
+    return elements_libres
+
+
+def _chevauche(zone, autres) -> bool:
+    """La zone (x0, y0, x1, y1) en recouvre-t-elle une des autres, ne serait-ce qu'un peu ?"""
+    return any(min(zone[2], a[2]) > max(zone[0], a[0]) and min(zone[3], a[3]) > max(zone[1], a[1]) for a in autres)
+
+
+def _dessiner_visuel(c, image, x, y, w, h, transparent=False):
+    """Dessine un visuel. transparent : son fond blanc devient transparent (un élément est derrière) ; sinon, comme
+    toujours, en JPEG opaque."""
+    buf = io.BytesIO()
+    if transparent:
+        try:
+            _libres().visuel_transparent(image).save(buf, format="PNG")
+            buf.seek(0)
+            c.drawImage(ImageReader(buf), x, y, w, h, mask="auto")
+            return
+        except Exception:  # visuel inhabituel : on le dessine opaque plutôt que de perdre l'affiche
+            buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=92)
+    buf.seek(0)
+    c.drawImage(ImageReader(buf), x, y, w, h)
+
+
 def _reg(reglages, el):
     g = (reglages or {}).get(el) or {}
     return float(g.get("dx", 0.0)), float(g.get("dy", 0.0)), max(0.1, float(g.get("s", 1.0)))
@@ -448,7 +566,7 @@ def _reg(reglages, el):
 
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
                    image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None,
-                   identite=None, logo_marque=None):
+                   identite=None, logo_marque=None, elements=None):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
     image : un visuel (image PIL) ou une liste de visuels (MAX_VISUELS au maximum), placés côte à côte sur une rangée.
@@ -458,6 +576,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     Une page plus large que haute (est_paysage) est mise en page en paysage : visuel(s) à gauche, textes à droite.
     logo_marque : logo de la marque (image PIL, de préférence RVBA), imprimé à la place du nom de la marque (le détail du
     produit reste écrit) ; ignoré si la marque est vide.
+    elements : éléments ajoutés à la main (voir elements_libres.py) : textes, prix, formes, derrière (par défaut, avant
+    tout le reste) ou devant le visuel. Leurs cadres portent la clé « libre_<identifiant> ».
     Retourne les cadres des éléments, normalisés (x0, y0, x1, y1) depuis le coin haut-gauche."""
     W, H = taille_page
     paysage = est_paysage(taille_page)
@@ -469,8 +589,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     texte_ligne, texte_pastille = (promo.get("ligne") or "").strip(), (promo.get("pastille") or "").strip()
     st = dict(STYLE_DEFAUT)
     st.update(style or {})
+    st["textes"] = textes_valides(st.get("textes"))
     reg, bold = polices_famille(st["police"])
-    hc = _hauteur_chiffre(bold)
+    # police, italique et souligné de chaque texte (par défaut : la police de l'affiche, en gras ou non comme toujours)
+    f_marque, i_marque, u_marque = police_texte(st, "marque")
+    f_detail, i_detail, u_detail = police_texte(st, "detail")
+    f_prix, i_prix, u_prix = police_texte(st, "prix")
+    f_barre, i_barre, u_barre = police_texte(st, "prix_barre")
+    f_ligne, i_ligne, u_ligne = police_texte(st, "ligne")
+    f_dates, i_dates, u_dates = police_texte(st, "dates")
+    hc = _hauteur_chiffre(f_prix)
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
     col_det = HexColor(couleur_detail(st))
     col_accent, col_sec = HexColor(st["couleur_accent"]), HexColor(st["couleur_secondaire"])
@@ -488,11 +616,21 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     cx_t, cx_img, larg_img = W / 2, W / 2, zone_w  # centre des textes, centre et largeur de la zone du visuel
     cadres = {}  # coordonnées PDF (origine en bas à gauche)
 
+    # ---- Éléments ajoutés à la main : ceux de derrière sont dessinés en premier, sous tout le reste
+    libres = []
+    if elements:
+        mod_libres = _libres()
+        libres = [mod_libres.mise_en_page(e, W, H, S, st) for e in mod_libres.elements_valides(elements)]
+        for g in libres:
+            if not g["e"]["devant"]:
+                mod_libres.dessiner(c, g, st)
+    derriere = [g["bbox"] for g in libres if not g["e"]["devant"] and not g["vide"]]
+
     # ---- Paysage : colonne de gauche = visuel(s), colonne de droite = textes, prix et logo
     disposition = None  # plusieurs visuels : (positions, largeur, hauteur) du groupe
     y_bas_img, y_haut_img = S * 0.05, y_haut
     if paysage and texte_pastille:  # la pastille occupe le coin haut gauche : le visuel se place en dessous
-        y_haut_img = y_haut - 1.95 * rayon_pastille(texte_pastille, S, bold) - S * 0.01
+        y_haut_img = y_haut - 1.95 * rayon_pastille(texte_pastille, S, f_prix) - S * 0.01
     if paysage and images:
         boite_h0 = y_haut_img - y_bas_img
         zone_img = (W - 2 * m) * min(0.58, 0.47 + 0.03 * len(images))  # largeur maximale de la colonne du visuel
@@ -526,12 +664,12 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
 
         # ---- Textes : marque (grande) puis détail (plus petit)
         if detail:
-            l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, g * 0.12, g * 0.058, max_lignes=2,
+            l_marque, t_marque = _ajuster_titre(texte_marque, f_marque, zone_w, g * 0.12, g * 0.058, max_lignes=2,
                                                 equilibre=paysage)
-            l_detail, t_detail = _ajuster_titre(detail, reg, zone_w, g * 0.12, g * 0.038, max_lignes=3,
+            l_detail, t_detail = _ajuster_titre(detail, f_detail, zone_w, g * 0.12, g * 0.038, max_lignes=3,
                                                 equilibre=paysage)
         else:
-            l_marque, t_marque = _ajuster_titre(texte_marque, bold, zone_w, g * 0.15, g * 0.058, max_lignes=3,
+            l_marque, t_marque = _ajuster_titre(texte_marque, f_marque, zone_w, g * 0.15, g * 0.058, max_lignes=3,
                                                 equilibre=paysage)
             l_detail, t_detail = [], 0.0
         bloc_m = len(l_marque) * t_marque * 1.15
@@ -549,19 +687,19 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         taille_d = 0.0
         if texte_dates:
             taille_d = g * 0.022
-            while stringWidth(texte_dates, reg, taille_d) > zone_w and taille_d > 6:
+            while stringWidth(texte_dates, f_dates, taille_d) > zone_w and taille_d > 6:
                 taille_d -= 0.5
 
         # texte sous le prix (calcul de la promotion, précision) : juste sous le prix
         bloc_l, l_ligne, t_ligne = 0.0, [], 0.0
         if texte_ligne:
-            l_ligne, t_ligne = _ajuster_titre(texte_ligne, reg, zone_w, g * 0.10, g * 0.028, max_lignes=3,
+            l_ligne, t_ligne = _ajuster_titre(texte_ligne, f_ligne, zone_w, g * 0.10, g * 0.028, max_lignes=3,
                                               equilibre=paysage)
             bloc_l = len(l_ligne) * t_ligne * 1.15
 
         taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
         while True:
-            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, bold, hc)
+            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc)
             if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
                 break
             taille_p -= 1
@@ -623,32 +761,28 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
             iw, ih = image.size
             ech = min(larg_img / iw, boite_h / ih)
             dw, dh = iw * ech * s, ih * ech * s
-            buf = io.BytesIO()
-            image.convert("RGB").save(buf, format="JPEG", quality=92)
-            buf.seek(0)
-            c.drawImage(ImageReader(buf), cx - dw / 2, cy - dh / 2, dw, dh)
-            cadres["image"] = (cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2)
+            zone_visuel = (cx - dw / 2, cy - dh / 2, cx + dw / 2, cy + dh / 2)
+            _dessiner_visuel(c, image, cx - dw / 2, cy - dh / 2, dw, dh, _chevauche(zone_visuel, derriere))
+            cadres["image"] = zone_visuel
         elif paysage:  # visuels en une rangée ou en grille, au mieux, centrés dans leur colonne
             rects, gw, gh = disposition
             gauche, bas = cx - gw * s / 2, cy - gh * s / 2
+            zone_visuel = (gauche, bas, gauche + gw * s, bas + gh * s)
+            transparent = _chevauche(zone_visuel, derriere)
             for img, (x_rel, y_rel, w_rel, h_rel) in zip(images, rects):
-                buf = io.BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=92)
-                buf.seek(0)
-                c.drawImage(ImageReader(buf), gauche + x_rel * s, bas + y_rel * s, w_rel * s, h_rel * s)
-            cadres["image"] = (gauche, bas, gauche + gw * s, bas + gh * s)
+                _dessiner_visuel(c, img, gauche + x_rel * s, bas + y_rel * s, w_rel * s, h_rel * s, transparent)
+            cadres["image"] = zone_visuel
         else:
-            r_pastille = rayon_pastille(texte_pastille, S, bold) if texte_pastille else 0.0
+            r_pastille = rayon_pastille(texte_pastille, S, f_prix) if texte_pastille else 0.0
             coin = ("droite", 1.95 * r_pastille, 1.95 * r_pastille) if texte_pastille else None
             positions, gw, gh = _disposition_rangee(images, zone_w, boite_h, coin=coin)
             cy = y_image_bas + gh / 2 + dy * H  # la rangée repose sur le bas de la zone, juste au-dessus de la marque
             gauche, bas = cx - gw * s / 2, cy - gh * s / 2
+            zone_visuel = (gauche, bas, gauche + gw * s, bas + gh * s)
+            transparent = _chevauche(zone_visuel, derriere)
             for img, (x_rel, w_rel) in zip(images, positions):
-                buf = io.BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=92)
-                buf.seek(0)
-                c.drawImage(ImageReader(buf), gauche + x_rel * s, bas, w_rel * s, gh * s)
-            cadres["image"] = (gauche, bas, gauche + gw * s, bas + gh * s)
+                _dessiner_visuel(c, img, gauche + x_rel * s, bas, w_rel * s, gh * s, transparent)
+            cadres["image"] = zone_visuel
 
     # ---- Logo de la marque (à la place du nom)
     if logo_marque is not None:
@@ -661,9 +795,9 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["marque"] = (cx - wl / 2, cy - hl / 2, cx + wl / 2, cy + hl / 2)
 
     # ---- Marque puis détail
-    for el, lignes, taille, bloc, y_bloc, police in (
-            ("marque", l_marque, t_marque, bloc_m, y_marque, bold),
-            ("detail", l_detail, t_detail, bloc_d, y_detail, reg)):
+    for el, lignes, taille, bloc, y_bloc, police, ital, soul in (
+            ("marque", l_marque, t_marque, bloc_m, y_marque, f_marque, i_marque, u_marque),
+            ("detail", l_detail, t_detail, bloc_d, y_detail, f_detail, i_detail, u_detail)):
         if not lignes:
             continue
         dx, dy, s = _reg(reglages, el)
@@ -672,10 +806,9 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cx = cx_t + dx * W
         cy = (y_bloc + bloc / 2) + dy * H
         haut = cy + hb / 2
-        c.setFillColor(col_det if el == "detail" else col_nom)
-        c.setFont(police, t)
         for i, l in enumerate(lignes):
-            c.drawCentredString(cx, haut - t * 0.85 - i * t * 1.15, l)
+            _ecrire_centre(c, l, cx, haut - t * 0.85 - i * t * 1.15, police, t, col_det if el == "detail" else col_nom,
+                           ital, soul)
         lmax = max(stringWidth(l, police, t) for l in lignes)
         cadres[el] = (cx - lmax / 2, haut - hb, cx + lmax / 2, haut)
 
@@ -687,10 +820,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         t = taille_b * s
         cx = cx_t + dx * W
         base = (y_barre + taille_b * 0.3) + dy * H - t * 0.3
-        wt = stringWidth(txt, reg, t)
-        c.setFillColor(col_sec)
-        c.setFont(reg, t)
-        c.drawCentredString(cx, base, txt)
+        wt = stringWidth(txt, f_barre, t)
+        _ecrire_centre(c, txt, cx, base, f_barre, t, col_sec, i_barre, u_barre)
         c.setStrokeColor(col_sec)
         c.setLineWidth(max(1.5, t * 0.08))
         c.setLineCap(1)  # extrémités arrondies
@@ -701,7 +832,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     dx, dy, s = _reg(reglages, "prix")
     p = taille_p * s
     cx = cx_t + dx * W
-    wp, h_kicker_p = _contenu_bandeau(prix, grand, kicker, p, bold, hc)
+    wp, h_kicker_p = _contenu_bandeau(prix, grand, kicker, p, f_prix, hc)
     base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
     if fond:  # bandeau coloré derrière le prix
         bx0, bx1 = cx - wp / 2 - pad_x * p, cx + wp / 2 + pad_x * p
@@ -714,7 +845,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.setLineWidth(max(1.5, g * 0.004 * s))
         c.line(cx - wp / 2, base - p * 0.07, cx + wp / 2, base - p * 0.07)
         cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc + h_kicker_p)
-    _dessiner_bandeau(c, prix, grand, kicker, cx, base, p, bold, col_prix, hc)
+    _dessiner_bandeau(c, prix, grand, kicker, cx, base, p, f_prix, col_prix, hc, i_prix, u_prix)
 
     # ---- Texte sous le prix
     if l_ligne:
@@ -723,22 +854,20 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         hb = len(l_ligne) * t * 1.15
         cx = cx_t + dx * W
         haut = (y_ligne + bloc_l / 2) + dy * H + hb / 2
-        c.setFillColor(col_nom)
-        c.setFont(reg, t)
         for i, l in enumerate(l_ligne):
-            c.drawCentredString(cx, haut - t * 0.85 - i * t * 1.15, l)
-        lmax = max(stringWidth(l, reg, t) for l in l_ligne)
+            _ecrire_centre(c, l, cx, haut - t * 0.85 - i * t * 1.15, f_ligne, t, col_nom, i_ligne, u_ligne)
+        lmax = max(stringWidth(l, f_ligne, t) for l in l_ligne)
         cadres["ligne"] = (cx - lmax / 2, haut - hb, cx + lmax / 2, haut)
 
     # ---- Pastille (« –25 % »), en haut à droite du visuel (en paysage : en haut à gauche, la colonne de droite
     # porte les textes)
     if texte_pastille:
         dx, dy, s = _reg(reglages, "pastille")
-        r0 = rayon_pastille(texte_pastille, S, bold)
+        r0 = rayon_pastille(texte_pastille, S, f_prix)
         r = r0 * s
         cx_p = (m + r0 * 0.95) if paysage else (W - m - r0 * 0.95)
         cx, cy = cx_p + dx * W, y_haut - r0 * 0.95 + dy * H
-        _pastille(c, texte_pastille, cx, cy, r, bold,
+        _pastille(c, texte_pastille, cx, cy, r, f_prix,
                   HexColor(st["couleur_fond_prix"]) if fond else col_prix, col_prix if fond else white)
         cadres["pastille"] = (cx - r, cy - r, cx + r, cy + r)
 
@@ -748,10 +877,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         t = taille_d * s
         cx = cx_t + dx * W
         base = (y_dates + taille_d * 0.3) + dy * H - t * 0.3
-        c.setFillColor(col_sec)
-        c.setFont(reg, t)
-        c.drawCentredString(cx, base, texte_dates)
-        wt = stringWidth(texte_dates, reg, t)
+        _ecrire_centre(c, texte_dates, cx, base, f_dates, t, col_sec, i_dates, u_dates)
+        wt = stringWidth(texte_dates, f_dates, t)
         cadres["dates"] = (cx - wt / 2, base - t * 0.2, cx + wt / 2, base + t * 0.8)
 
     # ---- Logo + nom de la pharmacie
@@ -778,6 +905,9 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         h_cadre = h_logo if logo_img is not None else max(ts * 1.4, 1.0)
         cadres["logo"] = (x_g, cy - h_cadre / 2, x_g + gw, cy + h_cadre / 2)
 
+    for g in libres:  # éléments de devant : au-dessus de tout, le cadre de l'affiche mis à part
+        if g["e"]["devant"]:
+            _libres().dessiner(c, g, st)
     try:
         couleur_cadre = HexColor(st.get("couleur_cadre") or STYLE_DEFAUT["couleur_cadre"])
     except Exception:
@@ -785,7 +915,12 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     _dessiner_cadre(c, W, H, S, st.get("cadre"), couleur_cadre)
     c.showPage()
     c.save()
-    return {k: (x0 / W, 1 - y1 / H, x1 / W, 1 - y0 / H) for k, (x0, y0, x1, y1) in cadres.items()}
+    # Ordre des cadres = ordre des couches dans l'éditeur (le dernier est au-dessus) : éléments de derrière, éléments
+    # de l'affiche, éléments de devant
+    tous = {f"libre_{g['e']['id']}": g["bbox"] for g in libres if not g["e"]["devant"]}
+    tous.update(cadres)
+    tous.update({f"libre_{g['e']['id']}": g["bbox"] for g in libres if g["e"]["devant"]})
+    return {k: (x0 / W, 1 - y1 / H, x1 / W, 1 - y0 / H) for k, (x0, y0, x1, y1) in tous.items()}
 
 
 def rendu(*args, **kwargs):

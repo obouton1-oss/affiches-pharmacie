@@ -9,6 +9,7 @@ from decimal import Decimal
 from reportlab.lib.units import mm
 
 import affiche as af
+import elements_libres
 import promos
 
 
@@ -22,7 +23,14 @@ def style_entree(e: dict) -> dict:
         style["ordre"] = list(ordre)
     if style["police"] not in af.POLICES:
         style["police"] = af.STYLE_DEFAUT["police"]
+    style["textes"] = af.textes_valides(style.get("textes"))  # affiche faite avant : aucun choix, comme à l'origine
     return style
+
+
+def elements_entree(e: dict) -> list:
+    """Éléments ajoutés à la main sur l'affiche enregistrée (textes, prix, formes), validés ; aucun pour une affiche
+    faite avant que cette possibilité existe."""
+    return elements_libres.elements_valides(e.get("elements"))
 
 
 def reglages_entree(e: dict) -> dict:
@@ -70,5 +78,5 @@ def pdf_depuis_entree(e: dict, visuels=(), identite=None, logo_marque=None) -> b
     pdf, _ = af.rendu(taille_entree(e), e.get("marque") or "", e.get("detail") or "", prix, prix_barre, dates,
                       list(visuels), bool(e.get("logo", True)), reglages=reglages_entree(e),
                       majuscules=bool(e.get("majuscules", True)), style=style_entree(e), promo=rendu_promo,
-                      identite=identite, logo_marque=logo_marque)
+                      identite=identite, logo_marque=logo_marque, elements=elements_entree(e))
     return pdf

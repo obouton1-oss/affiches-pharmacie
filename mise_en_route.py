@@ -51,6 +51,7 @@ def _initialiser(ctx, reglages: dict, prefs: dict, nom_type: str = "", permet_pe
     ss.mer_detail_autre = bool(style.get("couleur_detail"))  # détail d'une autre couleur que la marque ?
     ss.mer_c_detail = style.get("couleur_detail") or style["couleur_nom"]
     ss.mer_police = style["police"]
+    ss.mer_textes = af.textes_valides(style.get("textes"))  # police et style de chaque texte : gardés tels quels ici
     ss.mer_nom = prefs["nom"] or ctx.nom
     perso = reglages["format"] == PERSONNALISE
     ss.mer_format = reglages["format"] if (permet_perso or not perso) else "A5"
@@ -72,6 +73,7 @@ def _brouillon_style() -> dict:
         st_[champ] = ss[cle]
     st_["couleur_detail"] = ss.mer_c_detail if ss.get("mer_detail_autre") else None
     st_["police"] = ss.mer_police
+    st_["textes"] = af.textes_valides(ss.get("mer_textes"))
     st_["fond_prix"] = ss.mer_fond == "Sur fond coloré"
     if tuple(ss.mer_ordre) != af.ORDRE_DEFAUT:
         st_["ordre"] = list(ss.mer_ordre)

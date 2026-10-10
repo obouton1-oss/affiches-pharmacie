@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 import base64
+import hashlib
+import html
 import json
 
 import streamlit as st
@@ -17,6 +19,7 @@ from reportlab.lib.units import mm
 
 import acces
 import catalogue
+import elements_libres as libres
 import habillage
 import historique
 import images_produits as ip
@@ -33,8 +36,9 @@ import pharmacie
 import preferences
 import types_affiche
 from chemins import EN_LIGNE
-from affiche import (CADRES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, THEMES, apercu_png, disposition_a4, libelle_dates,
-                     orienter, parse_prix, pdf_impression, rendu, reglages_defaut)
+from affiche import (CADRES, DOSSIER_POLICES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, TEXTES, THEMES, apercu_png,
+                     disposition_a4, libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut,
+                     textes_valides)
 
 st.set_page_config(page_title="Affiches promo", page_icon="🏷️", layout="wide")
 habillage.appliquer()  # feuille de style (aussi pour la page de mot de passe)
@@ -86,6 +90,11 @@ if st.session_state.get("type_actif") not in {t["id"] for t in TYPES["types"]}:
 TYPE = types_affiche.trouver(TYPES, st.session_state.type_actif)
 if "style" not in st.session_state:
     st.session_state.style = dict(TYPE["style"])
+# Aperçu des polices : composant invisible (affiché à chaque exécution, écrans de mise en route compris) qui écrit chaque
+# nom de police dans sa propre police dans les listes de choix
+apercu_polices = components.declare_component("apercu_polices", path=str(DOSSIER_POLICES))
+with st.container(key="apercu_polices"):
+    apercu_polices(key="apercu_polices_composant", default=None)
 if MULTI and not PREFS["faite"] and CTX.prefixe != "":
     mise_en_route.afficher(CTX, premiere_fois=True)  # s'arrête ici (st.stop) tant que la mise en route n'est pas faite
 
@@ -156,6 +165,8 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
                     ("orientation_page", planche.PORTRAIT), ("logo_n", 0),
                     ("filtre_hist", ""),
+                    # éléments ajoutés à la main (texte, prix, forme) et élément ajouté choisi
+                    ("elements", []), ("element_libre_actif", None), ("selection_libre", False),
                     # plusieurs visuels (gamme) et « Nouvelle affiche »
                     ("extras", []), ("extra_uid", 0), ("extra_n", 0), ("ajout_extra", False), ("cand_extra", None),
                     ("derniere_sel_extra", None), ("raz", 0), ("raz_attente", False), ("w_exemplaires", 1),
@@ -197,6 +208,116 @@ def appliquer_theme():
         ss.style.update(theme)
         ss.style["couleur_detail"] = None  # un thème colore la marque et le détail de la même couleur
         ss.ver += 1  # recrée les sélecteurs de couleur avec les nouvelles valeurs
+
+
+COMME_AFFICHE = "Police de l'affiche"
+STYLES_TEXTE = ["gras", "italique", "souligne"]
+ICONES_STYLE = {"gras": ":material/format_bold:", "italique": ":material/format_italic:",
+                "souligne": ":material/format_underlined:"}
+AIDE_STYLE = "Gras, italique, souligné (on peut en choisir plusieurs, ou aucun)"
+DERRIERE, DEVANT = "Derrière le visuel", "Devant le visuel"
+
+
+def maj_texte(texte, cle_police, cle_style):
+    """Police, gras, italique et souligné d'un texte de l'affiche (marque, détail, prix, prix barré, texte sous le prix,
+    dates) ; ce qui est comme à l'origine n'est pas gardé."""
+    styles = ss[cle_style] or []
+    brut = {"police": ss[cle_police] if ss[cle_police] in POLICES else None, "gras": "gras" in styles,
+            "italique": "italique" in styles, "souligne": "souligne" in styles}
+    ss.style["textes"] = textes_valides({**(ss.style.get("textes") or {}), texte: brut})
+
+
+def reinitialiser_textes():
+    ss.style["textes"] = {}
+    ss.ver += 1
+
+
+def ligne_texte(texte, libelle):
+    """Une ligne « libellé, police, gras / italique / souligné » pour un texte de l'affiche."""
+    etat = textes_valides(ss.style.get("textes")).get(texte, {})
+    options = [COMME_AFFICHE] + POLICES
+    kp, ks = f"tx_police_{texte}_{ss.ver}", f"tx_style_{texte}_{ss.ver}"
+    c1, c2, c3 = st.columns([2.2, 3, 2.6], vertical_alignment="center")
+    c1.markdown(libelle)
+    c2.selectbox(libelle, options, index=options.index(etat["police"]) if etat.get("police") in POLICES else 0,
+                 key=kp, label_visibility="collapsed", on_change=maj_texte, args=(texte, kp, ks))
+    actifs = {"gras": etat.get("gras", TEXTES[texte][1]), "italique": etat.get("italique", False),
+              "souligne": etat.get("souligne", False)}
+    c3.segmented_control(libelle, STYLES_TEXTE, selection_mode="multi", default=[s for s in STYLES_TEXTE if actifs[s]],
+                         format_func=ICONES_STYLE.get, key=ks, label_visibility="collapsed", help=AIDE_STYLE,
+                         on_change=maj_texte, args=(texte, kp, ks))
+
+
+def _trouver_element(ident):
+    for e in ss.elements:
+        if e["id"] == ident:
+            return e
+    return None
+
+
+def ajouter_element(type_):
+    if len(ss.elements) >= libres.MAX_ELEMENTS:
+        ss.msg_alerte = f"Une affiche porte au plus {libres.MAX_ELEMENTS} éléments ajoutés."
+        return
+    e = libres.nouveau(type_, ss.style)
+    ss.elements = ss.elements + [e]
+    ss.element_libre_actif, ss.selection_libre = e["id"], True
+    ss.ver += 1
+
+
+def maj_element(ident, champ, cle_widget):
+    """Un réglage d'un élément ajouté : la valeur du champ de formulaire est reportée sur l'élément."""
+    e = _trouver_element(ident)
+    if e is None:
+        return
+    v = ss[cle_widget]
+    if champ in ("t", "l", "h", "cx", "cy"):  # curseurs en pourcentage
+        modif = {champ: v / 100}
+    elif champ == "devant":
+        modif = {"devant": v == DEVANT}
+    elif champ == "police":
+        modif = {"police": v if v in POLICES else None}
+    elif champ == "style":
+        v = v or []
+        modif = {"gras": "gras" in v, "italique": "italique" in v, "souligne": "souligne" in v}
+    else:
+        modif = {champ: v}
+    nouveau = libres.element_valide({**e, **modif})
+    ss.elements = [nouveau if x["id"] == ident else x for x in ss.elements]
+    if champ in ("forme",):
+        ss.ver += 1  # la taille proposée dépend de la forme
+
+
+def supprimer_element(ident):
+    restants = [x for x in ss.elements if x["id"] != ident]
+    ids = [x["id"] for x in ss.elements]
+    ss.elements = restants
+    ss.element_libre_actif = (restants[min(ids.index(ident), len(restants) - 1)]["id"] if restants else None)
+    ss.selection_libre = bool(restants) and ss.selection_libre
+    ss.ver += 1
+
+
+def dupliquer_element(ident):
+    e = _trouver_element(ident)
+    if e is None or len(ss.elements) >= libres.MAX_ELEMENTS:
+        if e is not None:
+            ss.msg_alerte = f"Une affiche porte au plus {libres.MAX_ELEMENTS} éléments ajoutés."
+        return
+    copie = libres.dupliquer(e)
+    ss.elements = ss.elements + [copie]
+    ss.element_libre_actif, ss.selection_libre = copie["id"], True
+    ss.ver += 1
+
+
+def choisir_libre(cle_widget, ids):
+    """Un élément ajouté est choisi dans la liste (le choix est gardé à part, car le libellé de chaque élément change
+    avec son texte, et Streamlit recrée alors la liste)."""
+    ss.element_libre_actif = ids[ss[cle_widget]] if ss[cle_widget] in ids else ss.element_libre_actif
+    ss.selection_libre = True
+
+
+def choisir_standard():
+    ss.selection_libre = False
 
 
 def maj_slider(el, champ):
@@ -325,6 +446,8 @@ def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choi
         params["promo"] = promo
     if logo_marque:
         params["logo_marque"] = logo_marque
+    if ss.elements:
+        params["elements"] = ss.elements  # absent sans élément ajouté : les anciennes affiches ne changent pas
     if visuel_affiche is None and not autres_visuels:
         params["sans_photo"] = True  # distingue l'affiche sans photo de la même affiche avec photo (historique.identifiant)
     params["type_affiche"] = TYPE["nom"]  # le type d'affiche choisi (pour s'y retrouver dans l'historique)
@@ -349,6 +472,8 @@ def rouvrir(ident):
     ss.props_autres, ss.journal_web, ss.info_nom = [], [], ""
     ss.props_choisie, ss.props_ouvertes = None, True
     ss.reglages = reimpression.reglages_entree(e)
+    ss.elements = reimpression.elements_entree(e)
+    ss.element_libre_actif, ss.selection_libre = (ss.elements[0]["id"] if ss.elements else None), False
     ss.style = reimpression.style_entree(e)
     ss.w_police = ss.style["police"]
     ss.ver += 1  # recrée les sélecteurs de couleur avec les valeurs de l'affiche
@@ -600,6 +725,9 @@ def nouvelle_affiche(garder_serie=False):
     ss.w_exemplaires = 1
     ss.reglages = reglages_defaut()
     ss.element_actif = "marque"
+    if not garder_serie:  # d'une affiche à la suivante d'une série, les éléments ajoutés (« NOUVEAU »…) restent
+        ss.elements, ss.element_libre_actif, ss.selection_libre = [], None, False
+    ss.selection_libre = ss.selection_libre and bool(ss.elements)
     ss.ver += 1
     ss.msg_ouvert = ("Nouvelle affiche : le formulaire est vide. Le format, la police, les couleurs et le logo "
                      "sont conservés.")
@@ -608,7 +736,8 @@ def nouvelle_affiche(garder_serie=False):
         appliquer_defauts_promo()  # valeurs de départ propres au type de promotion gardé
         ss.w_dates_on, ss.w_debut, ss.w_fin = dates
         ss.msg_ouvert = ("Affiche suivante : produit et prix effacés ; format, style, type de promotion"
-                         + (" et dates" if dates[0] else "") + " conservés.")
+                         + (", dates" if dates[0] else "") + (" et éléments ajoutés" if ss.elements else "")
+                         + " conservés.")
 
 
 def ajouter_regroupe(ident):
@@ -977,7 +1106,7 @@ with col_form:
                      help="Effacer la saisie en cours pour repartir de zéro (par exemple après une erreur)")
         if ss.raz_attente:
             with st.container(border=True):
-                st.warning("Effacer l'affiche en cours (produit, visuels, prix, promotion, dates, éléments déplacés) ? "
+                st.warning("Effacer l'affiche en cours (produit, visuels, prix, promotion, dates, éléments déplacés ou ajoutés) ? "
                            "Si elle n'a pas été enregistrée dans l'historique, elle sera perdue. Le format, la police, "
                            "les couleurs et le logo sont conservés.")
                 r1_, r2_ = st.columns(2)
@@ -1333,8 +1462,8 @@ with col_form:
                          "de photo est alors ignorée.")
 
         with st.expander("Police et couleurs"):
-            st.selectbox("Police", POLICES, key="w_police",
-                         on_change=maj_style, args=("police", "w_police"))
+            st.selectbox("Police de l'affiche (celle de tous les textes, sauf choix contraire plus bas)", POLICES,
+                         key="w_police", on_change=maj_style, args=("police", "w_police"))
             st.selectbox("Thème de couleurs", ["— choisir un thème —"] + list(THEMES), key="theme_choisi",
                          on_change=appliquer_theme)
             cwf = f"cb_fond_{ss.ver}"
@@ -1357,7 +1486,15 @@ with col_form:
                 cw = f"cp_{cle}_{ss.ver}"
                 (p1 if i % 2 == 0 else p2).color_picker(libelle, ss.style.get(cle) or ss.style["couleur_nom"],
                                                         key=cw, on_change=maj_style, args=(cle, cw))
-            st.caption("Les choix de police et de couleurs sont mémorisés pour les prochaines affiches.")
+            st.markdown("**Police et style de chaque texte**")
+            st.caption("Chaque texte peut avoir sa police, en gras, en italique ou souligné, indépendamment des autres.")
+            for texte, (libelle, _) in TEXTES.items():
+                ligne_texte(texte, libelle)
+            st.button("Remettre les polices et styles d'origine", key="textes_raz", on_click=reinitialiser_textes,
+                      type="tertiary", icon=":material/restart_alt:",
+                      disabled=not textes_valides(ss.style.get("textes")))
+            st.caption("Ces choix valent pour l'affiche en cours et les suivantes ; « Mettre à jour ce type » les garde "
+                       "pour la suite.")
 
         with st.expander("Cadre (en option)" + ("" if ss.style.get("cadre", "aucun") == "aucun"
                                                  else f" : {CADRES.get(ss.style.get('cadre'), '')}")):
@@ -1373,6 +1510,7 @@ with col_form:
             st.caption("Aucun cadre par défaut. Le cadre choisi reste appliqué aux affiches suivantes ; "
                        "revenir à « Aucun cadre » pour l'enlever.")
 
+        slot_elements = st.container()  # « Ajouter un texte, un prix ou une forme » (rempli après l'aperçu)
         slot_reglages = st.container()  # « Réglages précis » (rempli quand l'aperçu est affiché)
 
     # ------------------------------------------------------------------ Étape 4 : impression
@@ -1451,23 +1589,36 @@ with col_apercu:
             dates_txt = libelle_dates(debut, fin) if avec_dates else ""
             unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, [visuel] + autres_visuels, logo,
                                      reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo,
-                                     identite=IDENTITE, logo_marque=logo_marque_img)
+                                     identite=IDENTITE, logo_marque=logo_marque_img, elements=ss.elements)
             largeur_px = 900
             png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
+            noms_editeur = {**ELEMENTS, **{f"libre_{e['id']}": html.escape(libres.nom(e)) for e in ss.elements}}
+            actif_editeur = (f"libre_{ss.element_libre_actif}" if ss.selection_libre and ss.element_libre_actif
+                             else ss.element_actif)
             ev = editeur_affiche(image="data:image/png;base64," + base64.b64encode(png).decode(),
-                                 cadres=cadres, noms=ELEMENTS, ratio=taille[1] / taille[0],
-                                 actif=ss.element_actif, reserve=RESERVE_APERCU + (0 if visuel is not None or not avec_photo else 62),
+                                 cadres=cadres, noms=noms_editeur, ratio=taille[1] / taille[0],
+                                 actif=actif_editeur, reserve=RESERVE_APERCU + (0 if visuel is not None or not avec_photo else 62),
                                  key="editeur", default=None)  # sans visuel : un avertissement s'ajoute au-dessus de l'affiche
             if ev and ev.get("ts") != ss.dernier_ev:
                 ss.dernier_ev = ev["ts"]
                 el = ev.get("el")
                 if el in ELEMENTS:
                     ss.element_actif = el
+                    ss.selection_libre = False
                     if not ev.get("clic"):
                         g = ss.reglages[el]
                         g["dx"] += float(ev.get("ddx", 0))
                         g["dy"] -= float(ev.get("ddy", 0))
                         g["s"] = min(4.0, max(0.2, g["s"] * float(ev.get("ds", 1))))
+                        ss.ver += 1
+                    st.rerun()
+                elif isinstance(el, str) and el.startswith("libre_") and _trouver_element(el[6:]) is not None:
+                    ident = el[6:]  # élément ajouté à la main : choisi par un clic, déplacé ou agrandi en le tirant
+                    ss.element_libre_actif, ss.selection_libre = ident, True
+                    if not ev.get("clic"):
+                        ss.elements = [libres.deplacer(x, float(ev.get("ddx", 0)), float(ev.get("ddy", 0)),
+                                                       float(ev.get("ds", 1))) if x["id"] == ident else x
+                                       for x in ss.elements]
                         ss.ver += 1
                     st.rerun()
 
@@ -1505,8 +1656,91 @@ with col_apercu:
             st.button("Enregistrer et passer à la suivante", key="passer_suivante", on_click=enregistrer_puis_suivante,
                       icon=":material/skip_next:", use_container_width=True,
                       help="Enregistre cette affiche dans l'historique, puis efface le produit et le prix. "
-                           "Le format, le style, le type de promotion et les dates sont conservés.")
+                           "Le format, le style, le type de promotion, les dates et les éléments ajoutés sont conservés.")
             apercu_affiche = True
+
+# Éléments ajoutés à la main : texte, prix ou forme, de la couleur voulue, derrière (par défaut) ou devant le visuel
+with slot_elements:
+    with st.expander("Ajouter un texte, un prix ou une forme"):
+        st.caption("Un texte, un prix ou une forme (carré, rond, flèche, étoile…) à poser sur l'affiche : on choisit sa "
+                   "couleur, et s'il passe derrière le visuel (par défaut) ou devant. Il se déplace ensuite sur l'aperçu, "
+                   "comme les autres éléments.")
+        a1, a2, a3 = st.columns(3)
+        a1.button("Texte", key="ajout_texte", on_click=ajouter_element, args=("texte",), icon=":material/title:",
+                  use_container_width=True)
+        a2.button("Prix", key="ajout_prix", on_click=ajouter_element, args=("prix",), icon=":material/euro:",
+                  use_container_width=True)
+        a3.button("Forme", key="ajout_forme", on_click=ajouter_element, args=("forme",), icon=":material/category:",
+                  use_container_width=True)
+        if not ss.elements:
+            st.caption("Aucun élément ajouté.")
+        else:
+            par_id = {e["id"]: e for e in ss.elements}
+            if ss.element_libre_actif not in par_id:
+                ss.element_libre_actif = ss.elements[0]["id"]
+            etiquettes = [f"{n}. {libres.nom(e)}" for n, e in enumerate(ss.elements, 1)]  # numérotées : toutes différentes
+            cle_liste = f"elements_libres_liste_{ss.ver}_{hashlib.md5(chr(10).join(etiquettes).encode()).hexdigest()[:8]}"
+            st.radio("Éléments ajoutés", etiquettes, index=list(par_id).index(ss.element_libre_actif),
+                     format_func=_md, key=cle_liste, label_visibility="collapsed", on_change=choisir_libre,
+                     args=(cle_liste, dict(zip(etiquettes, par_id))))
+            ident = ss.element_libre_actif
+            e = par_id[ident]
+
+            def cle(champ):
+                return f"lib_{champ}_{ident}_{ss.ver}"
+
+            def reglage(champ):
+                return {"on_change": maj_element, "args": (ident, champ, cle(champ)), "key": cle(champ)}
+
+            st.radio("Position par rapport au visuel", [DERRIERE, DEVANT], index=int(e["devant"]), horizontal=True,
+                     help="Derrière : le visuel et les textes passent par-dessus l'élément (par exemple une forme de "
+                          "couleur en fond). Devant : l'élément recouvre le reste.", **reglage("devant"))
+            if e["type"] == "texte":
+                st.text_area("Texte", e["texte"], height=80, max_chars=200, **reglage("texte"))
+            elif e["type"] == "prix":
+                st.text_input("Prix", e["texte"], max_chars=12, placeholder="ex. 9,90", **reglage("texte"))
+                if not libres.prix_valide(e["texte"]):
+                    st.caption(":orange[Prix non reconnu : saisir par exemple 9,90 ou 12.]")
+            else:
+                st.selectbox("Forme", list(libres.FORMES), index=list(libres.FORMES).index(e["forme"]),
+                             format_func=lambda f: libres.FORMES[f][0], **reglage("forme"))
+                st.text_input("Texte dans la forme (facultatif)", e["texte"], max_chars=60, **reglage("texte"))
+            libelle_couleur = {"texte": "Couleur du texte", "prix": "Couleur du prix", "forme": "Couleur de la forme"}
+            k1, k2 = st.columns(2)
+            k1.color_picker(libelle_couleur[e["type"]], e["couleur"], **reglage("couleur"))
+            if e["type"] == "prix":
+                k2.checkbox("Prix sur fond coloré", e["fond"], **reglage("fond"))
+                if e["fond"]:
+                    k1.color_picker("Couleur du fond", e["couleur_fond"], **reglage("couleur_fond"))
+            if e["type"] != "forme" or e["texte"].strip():
+                options = [COMME_AFFICHE] + POLICES
+                t1, t2 = st.columns([3, 2], vertical_alignment="bottom")
+                t1.selectbox("Police du texte" if e["type"] != "prix" else "Police du prix", options,
+                             index=options.index(e["police"]) if e["police"] in POLICES else 0, **reglage("police"))
+                t2.segmented_control("Style", STYLES_TEXTE, selection_mode="multi", format_func=ICONES_STYLE.get,
+                                     default=[s for s, on in (("gras", e["gras"]), ("italique", e["italique"]),
+                                                              ("souligne", e["souligne"])) if on],
+                                     help=AIDE_STYLE, **reglage("style"))
+                if e["type"] == "forme":
+                    st.caption("Le texte écrit dans une forme est blanc sur un fond foncé, presque noir sur un fond clair.")
+            if e["type"] == "forme":
+                st.slider("Largeur (%)", 3, 160, int(round(e["l"] * 100)), **reglage("l"))
+                if libres.FORMES[e["forme"]][1]:
+                    st.slider("Hauteur (%)", 3, 160, int(round(e["h"] * 100)), **reglage("h"))
+            else:
+                mini, maxi = (2, 50) if e["type"] == "texte" else (3, 60)
+                st.slider("Taille (%)", mini, maxi, int(min(maxi, max(mini, round(e["t"] * 100)))), **reglage("t"))
+            st.slider("Rotation (°)", -180, 180, int(round(e["rot"] / 5) * 5), step=5, **reglage("rot"))
+            st.slider("Position horizontale (%)", -25, 125, int(round(e["cx"] * 100)), **reglage("cx"))
+            st.slider("Position verticale (%)", -25, 125, int(round(e["cy"] * 100)), **reglage("cy"))
+            b1, b2 = st.columns(2)
+            b1.button("Dupliquer", key=f"lib_dup_{ident}", on_click=dupliquer_element, args=(ident,),
+                      icon=":material/content_copy:", use_container_width=True)
+            b2.button("Supprimer", key=f"lib_sup_{ident}", on_click=supprimer_element, args=(ident,),
+                      icon=":material/delete:", use_container_width=True)
+            st.caption("Astuce : un clic sur un élément de l'aperçu le sélectionne ici ; le faire glisser le déplace, "
+                       "tirer sa poignée l'agrandit. Un élément caché derrière le visuel se choisit plutôt dans la liste "
+                       "ci-dessus, ou en cliquant sur la partie qui dépasse.")
 
 # Réglages qui dépendent de l'aperçu : placés dans le formulaire (étapes 3 et 4), à côté de l'aperçu qui reste visible
 with slot_reglages:
@@ -1518,7 +1752,7 @@ with slot_reglages:
             if ss.element_actif not in dispo:
                 ss.element_actif = dispo[0]
             el = st.radio("Élément", dispo, format_func=lambda e: ELEMENTS[e], horizontal=True,
-                          key="element_actif")
+                          key="element_actif", on_change=choisir_standard)
             g = ss.reglages[el]
             st.slider("Taille (%)", 20, 400, int(round(g["s"] * 100)), key=f"sl_s_{el}_{ss.ver}",
                       on_change=maj_slider, args=(el, "s"))
@@ -1819,3 +2053,4 @@ if MULTI:
                          "À mettre à la place de l'ancien bloc de cette pharmacie dans les secrets :")
                 st.code(fiche["bloc"], language="toml")
                 st.button("Effacer ce mot de passe de l'écran", on_click=lambda: ss.pop("adm_fiche", None))
+
