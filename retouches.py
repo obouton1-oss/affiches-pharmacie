@@ -28,7 +28,20 @@ MAX_HISTORIQUE = 60  # nombre de retours en arrière possibles
 
 # Ce que « Annuler » remet en l'état : l'aspect de l'affiche et ses textes (pas le produit ni les visuels)
 _CHAMPS_HISTORIQUE = ("style", "reglages", "elements", "marque", "detail", "w_prix", "w_barre", "w_barre_on",
-                      "w_majuscules", "w_logo", "w_logo_marque")
+                      "w_majuscules", "w_logo", "w_logo_marque", "w_photo", "w_dates_on", "w_promo_opt_pastille",
+                      "w_promo_opt_barre", "w_promo_opt_calcul", "w_promo_precision")
+# Éléments de l'affiche qu'on peut retirer depuis la barre de l'aperçu (poubelle) ; le prix et le petit texte de l'offre
+# font partie de l'offre et restent. « Annuler » les remet.
+SUPPRIMABLES = ("image", "marque", "detail", "prix_barre", "ligne", "pastille", "dates", "logo")
+MESSAGES_SUPPRESSION = {
+    "image": "Photo retirée (affiche sans photo). Pour la remettre : Annuler, ou étape 3, « Avec la photo du produit ».",
+    "marque": "Marque effacée. Pour la remettre : Annuler, ou la réécrire à l'étape 1.",
+    "detail": "Détail du produit effacé. Pour le remettre : Annuler, ou le réécrire à l'étape 1.",
+    "prix_barre": "Prix barré retiré. Pour le remettre : Annuler, ou étape 2.",
+    "ligne": "Texte sous le prix retiré. Pour le remettre : Annuler, ou étape 2.",
+    "pastille": "Pastille retirée. Pour la remettre : Annuler, ou étape 2.",
+    "dates": "Dates retirées. Pour les remettre : Annuler, ou étape 2, « Afficher une plage de dates ».",
+    "logo": "Logo retiré. Pour le remettre : Annuler, ou étape 3, « Afficher le logo »."}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 # Couleur de chaque texte de l'affiche : clé du style (plusieurs textes partagent parfois une couleur)
@@ -45,7 +58,14 @@ MAX_TEXTE = {"marque": 80, "detail": 300, "prix": 12, "prix_barre": 12}
 # Annuler / Rétablir
 # ----------------------------------------------------------------------------
 def _instantane(ss):
-    return {c: copy.deepcopy(ss.get(c)) for c in _CHAMPS_HISTORIQUE}
+    inst = {c: copy.deepcopy(ss.get(c)) for c in _CHAMPS_HISTORIQUE}
+    # prix barré : quand sa case est décochée, Streamlit vide son champ (non affiché) ; on garde la dernière valeur
+    # saisie, pour que « Annuler » la remette avec la case (et que ce vidage ne compte pas comme une retouche)
+    if ss.get("w_barre_on") and ss.get("w_barre"):
+        ss["retouche_barre"] = ss["w_barre"]
+    if not ss.get("w_barre_on"):
+        inst["w_barre"] = ss.get("retouche_barre") or ss.get("w_barre")
+    return inst
 
 
 def _empreinte(instantane):
@@ -169,6 +189,8 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
                               "indication": "Prix barré, ex. 10,50", "prix": True}
             if el == "logo":
                 o["actions"].append("masquer_logo")
+            if el in SUPPRIMABLES:
+                o["supprimable"] = True
             res[el] = o
         elif el.startswith("libre_"):
             e = next((x for x in ss.get("elements") or [] if x["id"] == el[6:]), None)
@@ -452,6 +474,31 @@ def _appliquer(ss, ev):
         ss["element_libre_actif"] = restants[min(ids.index(ident), len(restants) - 1)]["id"] if restants else None
         ss["selection_libre"] = False
         ss["selection_apercu"] = False
+        ss["ver"] = ss.get("ver", 0) + 1
+    elif action == "supprimer" and el in SUPPRIMABLES:
+        standard = ss.get("w_promo_type", "standard") == "standard"
+        if el == "image":
+            ss["w_photo"] = False
+        elif el == "marque":
+            ss["marque"] = ""
+        elif el == "detail":
+            ss["detail"] = ""
+        elif el == "prix_barre":
+            if standard:
+                ss["w_barre_on"] = False
+            else:
+                ss["w_promo_opt_barre"] = False
+        elif el == "ligne":
+            ss["w_promo_opt_calcul"] = False
+            ss["w_promo_precision"] = ""
+        elif el == "pastille":
+            ss["w_promo_opt_pastille"] = False
+        elif el == "dates":
+            ss["w_dates_on"] = False
+        elif el == "logo":
+            ss["w_logo"] = False
+        ss["selection_apercu"] = False
+        ss["msg_ouvert"] = MESSAGES_SUPPRESSION[el]
         ss["ver"] = ss.get("ver", 0) + 1
     elif action == "masquer_logo" and el == "logo":
         ss["w_logo"] = False

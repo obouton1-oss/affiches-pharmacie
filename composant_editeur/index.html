@@ -38,6 +38,8 @@ textarea.champ:focus{height:96px;white-space:pre-wrap;overflow:auto;z-index:40;b
 .btn.bord:hover{border-color:#C9CFDA;background:var(--fond)}
 .btn.ajout{border-color:var(--bord);background:#fff;padding:0 9px}
 .btn.ajout:hover{border-color:var(--prim);color:var(--prim);background:var(--prim-a)}
+.btn.corbeille{color:#9B2C2C}
+.btn.corbeille:hover{background:#FEF3F2;border-color:#F6C9C4;color:#B42318}
 .btn .pastille{width:18px;height:18px;border-radius:5px;border:1px solid rgba(0,0,0,.18);box-shadow:inset 0 0 0 1px rgba(255,255,255,.5)}
 .btn .pastille.vide{background:repeating-linear-gradient(135deg,#fff 0 4px,#E5E7EB 4px 6px)}
 .btn .lib{font-size:12px;color:var(--muet);font-weight:600}
@@ -275,7 +277,7 @@ document.addEventListener("keydown", e => {
   else if(k === "ArrowRight"){ e.preventDefault(); pousser(pas, 0); }
   else if(k === "ArrowUp"){ e.preventDefault(); pousser(0, -pas); }
   else if(k === "ArrowDown"){ e.preventDefault(); pousser(0, pas); }
-  else if((k === "Delete" || k === "Backspace") && o.libre){ e.preventDefault(); envoyer({action:"supprimer", el: args.actif}); }
+  else if((k === "Delete" || k === "Backspace") && (o.libre || o.supprimable)){ e.preventDefault(); envoyer({action:"supprimer", el: args.actif}); }
   else if(mod && (k === "d" || k === "D") && o.libre){ e.preventDefault(); envoyer({action:"dupliquer", el: args.actif}); }
   else if((k === "+" || k === "=") && o.taille){ e.preventDefault(); envoyer({action:"taille", el: args.actif, facteur: 1.1}); }
   else if((k === "-" || k === "_") && o.taille){ e.preventDefault(); envoyer({action:"taille", el: args.actif, facteur: 1/1.1}); }
@@ -471,6 +473,10 @@ function construireBarre(){
       () => maj("devant", !o.devant), o.devant ? "on" : ""));
   }
   outilsEl.appendChild(el("span", "pousse"));
+  if(o.libre || o.supprimable){
+    outilsEl.appendChild(bouton(ico("poubelle", 17), "Supprimer cet élément (touche Suppr) — Annuler le remet",
+                                () => envoyer({action:"supprimer", el: actif}), "corbeille"));
+  }
   outilsEl.appendChild(bouton(ico("points", 18), "Plus d'actions", b => {
     const box = el("div"), a = o.actions || [];
     if(o.taille && tailleDansMenu){
