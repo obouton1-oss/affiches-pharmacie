@@ -389,12 +389,13 @@ def _largeur_grand(prix, grand, taille, gras):
     return _largeur_texte(grand, gras, taille) if grand else _largeur_prix(prix, taille, gras)
 
 
-def _contenu_bandeau(prix, grand, kicker, taille, gras, hc, police_kicker=None):
-    """(largeur du contenu, hauteur ajoutée par le petit texte) du bandeau pour un corps `taille`."""
+def _contenu_bandeau(prix, grand, kicker, taille, gras, hc, police_kicker=None, echelle_kicker=1.0):
+    """(largeur du contenu, hauteur ajoutée par le petit texte) du bandeau pour un corps `taille`.
+    echelle_kicker : taille du petit texte choisie par l'utilisateur (1 = d'origine) ; le bandeau s'adapte."""
     w = _largeur_grand(prix, grand, taille, gras)
     if kicker:
-        w = max(w, _largeur_texte(kicker, police_kicker or gras, taille * K_TAILLE))
-    return w, ((K_ECART + hc * K_TAILLE) * taille if kicker else 0.0)
+        w = max(w, _largeur_texte(kicker, police_kicker or gras, taille * K_TAILLE * echelle_kicker))
+    return w, ((K_ECART + hc * K_TAILLE * echelle_kicker) * taille if kicker else 0.0)
 
 
 def _facteur_bandeau(grand, kicker):
@@ -612,6 +613,10 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     # petit texte au-dessus de l'offre : comme le prix, sauf choix propre
     f_kicker, i_kicker, u_kicker = (police_texte(st, "kicker") if "kicker" in st["textes"]
                                     else (f_prix, i_prix, u_prix))
+    # petit texte de l'offre : agrandi ou réduit, il reste dans le bandeau (qui s'adapte) ; déplacé, il en sort
+    kdx, kdy, ks = _reg(reglages, "kicker")
+    k_detache = bool(kicker) and (abs(kdx) > 1e-9 or abs(kdy) > 1e-9)
+    ks_bandeau = 1.0 if k_detache else ks
     hc = _hauteur_chiffre(f_prix)
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
     col_det = HexColor(couleur_detail(st))
@@ -714,7 +719,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
 
         taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
         while True:
-            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc, f_kicker)
+            w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc, f_kicker, ks_bandeau)
             if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
                 break
             taille_p -= 1
@@ -844,14 +849,13 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["prix_barre"] = (cx - wt / 2, base - t * 0.25, cx + wt / 2, base + t * 0.95)
 
     # ---- Prix (ou texte principal de l'offre), avec son petit texte au-dessus. Le petit texte se règle à part
-    # (élément « kicker ») : tant qu'il n'est ni déplacé ni agrandi, il reste dans le bandeau, au-dessus de l'offre ;
+    # (élément « kicker ») : tant qu'il n'est pas déplacé, il reste dans le bandeau, au-dessus de l'offre (agrandi ou
+    # réduit, le bandeau s'adapte à sa taille) ;
     # déplacé ou agrandi, il le quitte et le bandeau n'entoure plus que l'offre.
     dx, dy, s = _reg(reglages, "prix")
     p = taille_p * s
     cx = cx_t + dx * W
-    kdx, kdy, ks = _reg(reglages, "kicker")
-    k_detache = bool(kicker) and (abs(kdx) > 1e-9 or abs(kdy) > 1e-9 or abs(ks - 1.0) > 1e-9)
-    wp, h_kicker_p = _contenu_bandeau(prix, grand, "" if k_detache else kicker, p, f_prix, hc, f_kicker)
+    wp, h_kicker_p = _contenu_bandeau(prix, grand, "" if k_detache else kicker, p, f_prix, hc, f_kicker, ks)
     base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
     if fond:  # bandeau coloré derrière le prix
         bx0, bx1 = cx - wp / 2 - pad_x * p, cx + wp / 2 + pad_x * p
@@ -866,10 +870,13 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["prix"] = (cx - wp / 2, base - p * 0.09, cx + wp / 2, base + p * hc + h_kicker_p)
     _dessiner_bandeau(c, prix, grand, "", cx, base, p, f_prix, col_prix, hc, i_prix, u_prix)
     if kicker:
-        h_att = (K_ECART + hc * K_TAILLE) * p  # place du petit texte dans le bandeau (position d'origine)
-        base_att = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_att) / 2
         tk = p * K_TAILLE * ks
-        kcx, kbase = cx + kdx * W, base_att + hc * p + K_ECART * p + kdy * H
+        if k_detache:  # sorti du bandeau : sa place d'origine, plus le déplacement choisi
+            h_att = (K_ECART + hc * K_TAILLE) * p
+            base_att = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_att) / 2
+            kcx, kbase = cx + kdx * W, base_att + hc * p + K_ECART * p + kdy * H
+        else:  # dans le bandeau, au-dessus de l'offre (le bandeau a la hauteur voulue pour sa taille)
+            kcx, kbase = cx, base + hc * p + K_ECART * p
         _dessiner_texte(c, kicker, kcx, kbase, tk, f_kicker, col_kicker, hc, i_kicker, u_kicker)
         wk = _largeur_texte(kicker, f_kicker, tk)
         cadres["kicker"] = (kcx - wk / 2, kbase - tk * 0.2, kcx + wk / 2, kbase + tk * (hc + 0.15))

@@ -388,9 +388,14 @@ def choisir_standard():
     ss.selection_apercu = True
 
 
-def maj_slider(el, champ):
-    v = ss[f"sl_{champ}_{el}_{ss.ver}"]
+def maj_slider(el, champ, cle_widget):
+    """Curseur de « Réglages précis ». La clé du curseur est transmise telle qu'affichée : un autre réglage traité
+    juste avant (même passage) peut avoir changé ss.ver, et recalculer la clé ici la manquerait (KeyError)."""
+    v = ss.get(cle_widget)
+    if v is None:
+        return
     ss.reglages[el][champ] = v / 100
+    ss.ver += 1  # le même réglage est aussi sous le champ de saisie et sur la barre de l'aperçu : à jour partout
 
 
 def reinitialiser(el=None):
@@ -1864,12 +1869,13 @@ with slot_reglages:
             el = st.radio("Élément", dispo, format_func=lambda e: ELEMENTS[e], horizontal=True,
                           key="element_actif", on_change=choisir_standard)
             g = ss.reglages[el]
-            st.slider("Taille (%)", 20, 400, int(round(g["s"] * 100)), key=f"sl_s_{el}_{ss.ver}",
-                      on_change=maj_slider, args=(el, "s"))
+            ks_, kx_, ky_ = f"sl_s_{el}_{ss.ver}", f"sl_dx_{el}_{ss.ver}", f"sl_dy_{el}_{ss.ver}"
+            st.slider("Taille (%)", 20, 400, int(round(g["s"] * 100)), key=ks_,
+                      on_change=maj_slider, args=(el, "s", ks_))
             st.slider("Position horizontale (← →, %)", -50, 50, int(round(g["dx"] * 100)),
-                      key=f"sl_dx_{el}_{ss.ver}", on_change=maj_slider, args=(el, "dx"))
+                      key=kx_, on_change=maj_slider, args=(el, "dx", kx_))
             st.slider("Position verticale (↓ ↑, %)", -50, 50, int(round(g["dy"] * 100)),
-                      key=f"sl_dy_{el}_{ss.ver}", on_change=maj_slider, args=(el, "dy"))
+                      key=ky_, on_change=maj_slider, args=(el, "dy", ky_))
             b1, b2 = st.columns(2)
             b1.button("Réinitialiser cet élément", on_click=reinitialiser, args=(el,))
             b2.button("Tout réinitialiser", on_click=reinitialiser)
