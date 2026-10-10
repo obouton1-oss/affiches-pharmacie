@@ -150,6 +150,7 @@ def _vignette(c, x, y, w, h, e, st):
     reg, bold = af.polices_famille(st["police"])
     hc = af._hauteur_chiffre(bold)
     col_nom, col_sec = HexColor(st["couleur_nom"]), HexColor(st["couleur_secondaire"])
+    col_det = HexColor(af.couleur_detail(st))
 
     c.setFillColor(white)
     c.setStrokeColor(HexColor("#D9D9D9"))
@@ -186,7 +187,7 @@ def _vignette(c, x, y, w, h, e, st):
         if detail:
             lignes, t = af._ajuster_titre(detail, reg, zone_w, h * 0.12, h * 0.040, max_lignes=3)
             bloc = len(lignes) * t * 1.15
-            _lignes_centrees(c, lignes, t, reg, col_nom, cx, y_cur + bloc)
+            _lignes_centrees(c, lignes, t, reg, col_det, cx, y_cur + bloc)
             y_cur += bloc + h * 0.012
         if logo_m is not None:
             hl = min(h * 0.075, zone_w * 0.85 * logo_m.height / logo_m.width)
@@ -244,7 +245,7 @@ def _vignette(c, x, y, w, h, e, st):
     else:
         _lignes_centrees(c, l_marque, t_marque, bold, col_nom, cx, haut_groupe)
     if l_detail:
-        _lignes_centrees(c, l_detail, t_detail, reg, col_nom, cx, haut_groupe - bloc_m - ecart)
+        _lignes_centrees(c, l_detail, t_detail, reg, col_det, cx, haut_groupe - bloc_m - ecart)
     if pastille:  # en haut à gauche du visuel (la colonne de droite porte les textes)
         r = af.rayon_pastille(pastille, min(w, h * 1.1), bold)
         _pastille(c, pastille, x + pad + r * 0.95, y + h - pad - r * 0.95, r, st, bold, fond)

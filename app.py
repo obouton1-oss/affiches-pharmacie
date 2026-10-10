@@ -185,10 +185,17 @@ def maj_style(cle, cle_widget):
     ss.style[cle] = ss[cle_widget]  # vaut pour l'affiche en cours ; « Mettre à jour ce type » le garde pour la suite
 
 
+def maj_detail_autre(cle_widget):
+    """Case « Détail du produit d'une autre couleur que la marque » : cochée, le détail part de la couleur de la
+    marque (à modifier ensuite) ; décochée, il suit de nouveau la couleur de la marque."""
+    ss.style["couleur_detail"] = (ss.style.get("couleur_detail") or ss.style["couleur_nom"]) if ss[cle_widget] else None
+
+
 def appliquer_theme():
     theme = THEMES.get(ss.theme_choisi)
     if theme:
         ss.style.update(theme)
+        ss.style["couleur_detail"] = None  # un thème colore la marque et le détail de la même couleur
         ss.ver += 1  # recrée les sélecteurs de couleur avec les nouvelles valeurs
 
 
@@ -1333,14 +1340,23 @@ with col_form:
             cwf = f"cb_fond_{ss.ver}"
             st.checkbox("Prix sur fond coloré (bandeau)", ss.style["fond_prix"], key=cwf,
                         on_change=maj_style, args=("fond_prix", cwf))
+            cdm = f"cb_detail_autre_{ss.ver}"
+            detail_autre = st.checkbox("Détail du produit d'une autre couleur que la marque",
+                                       bool(ss.style.get("couleur_detail")), key=cdm,
+                                       on_change=maj_detail_autre, args=(cdm,),
+                                       help="Décochée : la marque et le détail du produit ont la même couleur.")
             p1, p2 = st.columns(2)
-            for cle, libelle, colonne in (("couleur_nom", "Couleur de la marque et du détail", p1),
-                                          ("couleur_prix", "Couleur du prix", p2),
-                                          ("couleur_fond_prix", "Couleur du fond du prix", p1),
-                                          ("couleur_accent", "Filet sous le prix (sans fond)", p2),
-                                          ("couleur_secondaire", "Dates et prix barré", p1)):
+            champs_couleurs = [("couleur_nom", "Couleur de la marque" if detail_autre
+                                else "Couleur de la marque et du détail")]
+            if detail_autre:
+                champs_couleurs.append(("couleur_detail", "Couleur du détail"))
+            champs_couleurs += [("couleur_prix", "Couleur du prix"), ("couleur_fond_prix", "Couleur du fond du prix"),
+                                ("couleur_accent", "Filet sous le prix (sans fond)"),
+                                ("couleur_secondaire", "Dates et prix barré")]
+            for i, (cle, libelle) in enumerate(champs_couleurs):
                 cw = f"cp_{cle}_{ss.ver}"
-                colonne.color_picker(libelle, ss.style[cle], key=cw, on_change=maj_style, args=(cle, cw))
+                (p1 if i % 2 == 0 else p2).color_picker(libelle, ss.style.get(cle) or ss.style["couleur_nom"],
+                                                        key=cw, on_change=maj_style, args=(cle, cw))
             st.caption("Les choix de police et de couleurs sont mémorisés pour les prochaines affiches.")
 
         with st.expander("Cadre (en option)" + ("" if ss.style.get("cadre", "aucun") == "aucun"

@@ -48,6 +48,8 @@ def _initialiser(ctx, reglages: dict, prefs: dict, nom_type: str = "", permet_pe
     ss.mer_fond = "Sur fond coloré" if style.get("fond_prix") else "Sans fond (prix souligné)"
     for cle, champ in CLES_STYLE.items():
         ss[cle] = style[champ]
+    ss.mer_detail_autre = bool(style.get("couleur_detail"))  # détail d'une autre couleur que la marque ?
+    ss.mer_c_detail = style.get("couleur_detail") or style["couleur_nom"]
     ss.mer_police = style["police"]
     ss.mer_nom = prefs["nom"] or ctx.nom
     perso = reglages["format"] == PERSONNALISE
@@ -68,6 +70,7 @@ def _brouillon_style() -> dict:
     st_ = dict(af.STYLE_DEFAUT)
     for cle, champ in CLES_STYLE.items():
         st_[champ] = ss[cle]
+    st_["couleur_detail"] = ss.mer_c_detail if ss.get("mer_detail_autre") else None
     st_["police"] = ss.mer_police
     st_["fond_prix"] = ss.mer_fond == "Sur fond coloré"
     if tuple(ss.mer_ordre) != af.ORDRE_DEFAUT:
@@ -104,6 +107,7 @@ def _appliquer_theme() -> None:
         ss = st.session_state
         ss.mer_c_nom, ss.mer_c_prix = theme["couleur_nom"], theme["couleur_prix"]
         ss.mer_c_accent = theme["couleur_accent"]
+        ss.mer_detail_autre = False  # un thème colore la marque et le détail de la même couleur
         ss.mer_fond = "Sur fond coloré" if theme["fond_prix"] else "Sans fond (prix souligné)"
         if theme.get("couleur_fond_prix"):
             ss.mer_c_fond = theme["couleur_fond_prix"]
@@ -112,6 +116,7 @@ def _appliquer_theme() -> None:
 def _appliquer_couleurs_visuel(proposition: dict) -> None:
     ss = st.session_state
     ss.mer_c_nom = proposition.get("couleur_nom", ss.mer_c_nom)
+    ss.mer_detail_autre = False
     ss.mer_c_accent = proposition.get("couleur_accent", ss.mer_c_accent)
     ss.mer_c_prix = proposition.get("couleur_prix", ss.mer_c_prix)
     ss.mer_fond = "Sur fond coloré" if proposition.get("fond_prix") else "Sans fond (prix souligné)"
@@ -391,6 +396,9 @@ def afficher(ctx, premiere_fois: bool, nouveau_type: bool = False) -> None:
         k1, k2 = st.columns(2)
         k1.color_picker("Couleur de la marque et du produit", key="mer_c_nom")
         k2.color_picker("Couleur d'accentuation (traits, pastilles)", key="mer_c_accent")
+        d1, d2 = st.columns(2)
+        d1.checkbox("Détail du produit d'une autre couleur que la marque", key="mer_detail_autre")
+        d2.color_picker("Couleur du détail du produit", key="mer_c_detail", disabled=not ss.mer_detail_autre)
 
         # ---- 6. Habitudes
         habillage.titre_etape(6, "Format et habitudes", "Format, orientation, majuscules et logo de ce type d'affiche.")

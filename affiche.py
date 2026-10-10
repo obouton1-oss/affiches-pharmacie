@@ -70,7 +70,16 @@ POLICES = ["Helvetica", "Montserrat", "Poppins", "Lato", "Open Sans", "Nunito", 
 _fichiers_police = {"Open Sans": "OpenSans", "Playfair Display": "PlayfairDisplay"}
 STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix": "#000000",
                 "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
-                "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848"}
+                "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848",
+                # couleur du détail du produit : vide = la même que la marque (cas d'origine, et des affiches déjà faites)
+                "couleur_detail": None}
+
+
+def couleur_detail(st) -> str:
+    """Couleur (hexadécimale) du détail du produit : celle de la marque tant qu'aucune autre n'est choisie."""
+    return st.get("couleur_detail") or st["couleur_nom"]
+
+
 # Cadre autour de l'affiche : en option seulement (aucun par défaut)
 CADRES = {"aucun": "Aucun cadre", "fin": "Trait fin", "epais": "Trait épais", "double": "Double trait",
           "arrondi": "Coins arrondis", "pointille": "Pointillés", "coins": "Coins seulement"}
@@ -463,6 +472,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     reg, bold = polices_famille(st["police"])
     hc = _hauteur_chiffre(bold)
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
+    col_det = HexColor(couleur_detail(st))
     col_accent, col_sec = HexColor(st["couleur_accent"]), HexColor(st["couleur_secondaire"])
     marque, detail = (marque or "").strip(), (detail or "").strip()
     if not marque:
@@ -662,7 +672,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cx = cx_t + dx * W
         cy = (y_bloc + bloc / 2) + dy * H
         haut = cy + hb / 2
-        c.setFillColor(col_nom)
+        c.setFillColor(col_det if el == "detail" else col_nom)
         c.setFont(police, t)
         for i, l in enumerate(lignes):
             c.drawCentredString(cx, haut - t * 0.85 - i * t * 1.15, l)
