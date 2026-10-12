@@ -45,9 +45,12 @@ def orienter(taille_page, paysage: bool):
     return (grand, petit) if paysage else (petit, grand)
 
 
-ELEMENTS = {"image": "Visuel", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
+ELEMENTS = {"image": "Visuel", "image_1": "Visuel 1", "image_2": "Visuel 2", "image_3": "Visuel 3",
+            "image_4": "Visuel 4", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
             "prix": "Prix", "kicker": "Petit texte de l'offre", "ligne": "Texte sous le prix", "pastille": "Pastille",
             "dates": "Dates", "logo": "Logo"}
+# Visuel seul (« image ») ou visuels d'une gamme (« image_1 » à « image_4 », réglés chacun à part)
+VISUELS = ("image", "image_1", "image_2", "image_3", "image_4")
 # Ordre des textes sous le visuel, de haut en bas (réglage « ordre » du style ; le texte sous le prix suit toujours le prix)
 ORDRE_DEFAUT = ("marque", "detail", "prix_barre", "prix", "dates")
 LIBELLES_ORDRE = {"marque": "Marque", "detail": "Produit (détail)", "prix_barre": "Prix barré", "prix": "Prix promo",
@@ -576,6 +579,23 @@ def _reg(reglages, el):
     return float(g.get("dx", 0.0)), float(g.get("dy", 0.0)), max(0.1, float(g.get("s", 1.0)))
 
 
+def _dessiner_gamme(c, images, rects, reglages, W, H, derriere, cadres):
+    """Dessine les visuels d'une gamme (2 à MAX_VISUELS), chacun à sa place dans la mise en page automatique
+    (rects : (x, y, largeur, hauteur) en points), puis déplacé et redimensionné selon son propre réglage « image_<n> »
+    (dx, dy : fractions de la page ; s : facteur de taille autour de son centre). Sans réglage propre, la mise en page est
+    exactement celle d'origine. Les visuels suivants sont dessinés par-dessus les précédents. Chaque visuel a son cadre
+    « image_<n> » (n à partir de 1) dans cadres."""
+    for n, (img, (x, y, w, h)) in enumerate(zip(images, rects), start=1):
+        dx, dy, s = _reg(reglages, f"image_{n}")
+        if abs(dx) > 1e-12 or abs(dy) > 1e-12 or abs(s - 1.0) > 1e-12:
+            cx, cy = x + w / 2 + dx * W, y + h / 2 + dy * H
+            w, h = w * s, h * s
+            x, y = cx - w / 2, cy - h / 2
+        zone = (x, y, x + w, y + h)
+        _dessiner_visuel(c, img, x, y, w, h, _chevauche(zone, derriere))
+        cadres[f"image_{n}"] = zone
+
+
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
                    image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None,
                    identite=None, logo_marque=None, elements=None):
@@ -787,22 +807,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         elif paysage:  # visuels en une rangée ou en grille, au mieux, centrés dans leur colonne
             rects, gw, gh = disposition
             gauche, bas = cx - gw * s / 2, cy - gh * s / 2
-            zone_visuel = (gauche, bas, gauche + gw * s, bas + gh * s)
-            transparent = _chevauche(zone_visuel, derriere)
-            for img, (x_rel, y_rel, w_rel, h_rel) in zip(images, rects):
-                _dessiner_visuel(c, img, gauche + x_rel * s, bas + y_rel * s, w_rel * s, h_rel * s, transparent)
-            cadres["image"] = zone_visuel
+            _dessiner_gamme(c, images, [(gauche + x_rel * s, bas + y_rel * s, w_rel * s, h_rel * s)
+                                        for (x_rel, y_rel, w_rel, h_rel) in rects], reglages, W, H, derriere, cadres)
         else:
             r_pastille = rayon_pastille(texte_pastille, S, f_prix) if texte_pastille else 0.0
             coin = ("droite", 1.95 * r_pastille, 1.95 * r_pastille) if texte_pastille else None
             positions, gw, gh = _disposition_rangee(images, zone_w, boite_h, coin=coin)
             cy = y_image_bas + gh / 2 + dy * H  # la rangée repose sur le bas de la zone, juste au-dessus de la marque
             gauche, bas = cx - gw * s / 2, cy - gh * s / 2
-            zone_visuel = (gauche, bas, gauche + gw * s, bas + gh * s)
-            transparent = _chevauche(zone_visuel, derriere)
-            for img, (x_rel, w_rel) in zip(images, positions):
-                _dessiner_visuel(c, img, gauche + x_rel * s, bas, w_rel * s, gh * s, transparent)
-            cadres["image"] = zone_visuel
+            _dessiner_gamme(c, images, [(gauche + x_rel * s, bas, w_rel * s, gh * s) for (x_rel, w_rel) in positions],
+                            reglages, W, H, derriere, cadres)
 
     # ---- Logo de la marque (à la place du nom)
     if logo_marque is not None:

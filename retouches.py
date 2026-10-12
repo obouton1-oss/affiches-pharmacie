@@ -9,7 +9,7 @@ que les champs du formulaire ne soient dessinés (Streamlit interdit de modifier
                                        forme, devant
   {action: "taille", el, facteur}      plus grand / plus petit
   {action: "tourner", el, angle}       rotation d'un élément ajouté
-  {action: "reinit" | "dupliquer" | "supprimer" | "masquer_logo" | "texte_marque", el}
+  {action: "reinit" | "dupliquer" | "supprimer" | "masquer_logo" | "texte_marque" | "regrouper", el}
   {action: "ajouter", type}            nouveau texte, prix ou forme
   {action: "police_affiche" | "theme", valeur}
   {action: "annuler" | "retablir" | "deselect"}
@@ -27,7 +27,7 @@ import elements_libres as libres
 MAX_HISTORIQUE = 60  # nombre de retours en arrière possibles
 
 # Ce que « Annuler » remet en l'état : l'aspect de l'affiche et ses textes (pas le produit ni les visuels)
-_CHAMPS_HISTORIQUE = ("style", "reglages", "elements", "marque", "detail", "w_prix", "w_barre", "w_barre_on",
+_CHAMPS_HISTORIQUE = ("style", "reglages", "elements", "extras", "marque", "detail", "w_prix", "w_barre", "w_barre_on",
                       "w_majuscules", "w_logo", "w_logo_marque", "w_photo", "w_dates_on", "w_promo_opt_pastille",
                       "w_promo_opt_barre", "w_promo_opt_calcul", "w_promo_precision")
 # Éléments de l'affiche qu'on peut retirer depuis la barre de l'aperçu (poubelle) ; le prix et le petit texte de l'offre
@@ -57,8 +57,16 @@ MAX_TEXTE = {"marque": 80, "detail": 300, "prix": 12, "prix_barre": 12}
 # ----------------------------------------------------------------------------
 # Annuler / Rétablir
 # ----------------------------------------------------------------------------
+def _copie_champ(champ, valeur):
+    """Copie d'un champ pour l'historique. Les visuels de la gamme (« extras ») gardent leurs images (jamais modifiées
+    sur place : pas besoin de les copier, ce qui serait lourd à chaque exécution)."""
+    if champ == "extras":
+        return [dict(x) for x in (valeur or [])]
+    return copy.deepcopy(valeur)
+
+
 def _instantane(ss):
-    inst = {c: copy.deepcopy(ss.get(c)) for c in _CHAMPS_HISTORIQUE}
+    inst = {c: _copie_champ(c, ss.get(c)) for c in _CHAMPS_HISTORIQUE}
     # prix barré : quand sa case est décochée, Streamlit vide son champ (non affiché) ; on garde la dernière valeur
     # saisie, pour que « Annuler » la remette avec la case (et que ce vidage ne compte pas comme une retouche)
     if ss.get("w_barre_on") and ss.get("w_barre"):
@@ -97,7 +105,7 @@ def oublier(ss):
 def _restaurer(ss, inst):
     for c in _CHAMPS_HISTORIQUE:
         if c in inst and inst[c] is not None:
-            ss[c] = copy.deepcopy(inst[c])
+            ss[c] = _copie_champ(c, inst[c])
     ss["w_police"] = ss["style"].get("police", "Helvetica")
     ss["ver"] = ss.get("ver", 0) + 1  # les champs du formulaire reprennent les valeurs rétablies
     ss["retouche_present"], ss["retouche_empreinte"] = _instantane(ss), _empreinte(_instantane(ss))
@@ -191,13 +199,20 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
                 o["actions"].append("masquer_logo")
             if el in SUPPRIMABLES:
                 o["supprimable"] = True
+            if el in af.VISUELS:  # un visuel (seul, ou l'un de la gamme) : dupliquer, retirer, remettre en rangée
+                n_visuels = sum(1 for k in cadres if k in af.VISUELS)
+                o["dupliquable"] = n_visuels < af.MAX_VISUELS
+                if el != "image" and numero_visuel(el) >= 2:
+                    o["supprimable"] = True  # le 1er visuel (principal) se change dans le formulaire
+                if el != "image":
+                    o["actions"].append("regrouper")
             res[el] = o
         elif el.startswith("libre_"):
             e = next((x for x in ss.get("elements") or [] if x["id"] == el[6:]), None)
             if e is None:
                 continue
             o = {"titre": libres.TYPES[e["type"]], "taille": True, "libre": True, "devant": e["devant"],
-                 "couleur": e["couleur"], "actions": ["tourner", "dupliquer", "supprimer"]}
+                 "couleur": e["couleur"], "actions": ["tourner", "dupliquer", "supprimer"], "dupliquable": True}
             if e["type"] == "texte":
                 o["texte"] = {"valeur": e["texte"], "multi": True, "max": 200, "indication": "Texte"}
             elif e["type"] == "prix":
@@ -230,6 +245,65 @@ def couleurs_affiche(ss):
             if c and c.upper() not in vues:
                 vues.append(c.upper())
     return vues[:10]
+
+
+# ----------------------------------------------------------------------------
+# Visuels de la gamme : chacun a ses propres réglages (image_1 à image_4, selon sa place sur l'affiche)
+# ----------------------------------------------------------------------------
+def numero_visuel(el) -> int:
+    """Numéro (à partir de 1) d'un visuel de la gamme (« image_2 » -> 2) ; 1 pour le visuel seul (« image »)."""
+    m = re.fullmatch(r"image_(\d)", str(el))
+    return int(m.group(1)) if m else 1
+
+
+def _cle_visuel(n):
+    return f"image_{n}"
+
+
+def retirer_reglage_visuel(reglages, n):
+    """Le visuel n (à partir de 1) est retiré : les suivants remontent d'une place avec leurs réglages."""
+    for k in range(n, af.MAX_VISUELS):
+        reglages[_cle_visuel(k)] = dict(reglages.get(_cle_visuel(k + 1)) or af.reglages_defaut()[_cle_visuel(k + 1)])
+    reglages[_cle_visuel(af.MAX_VISUELS)] = dict(af.reglages_defaut()[_cle_visuel(af.MAX_VISUELS)])
+
+
+def inserer_reglage_visuel(reglages, n, depuis):
+    """Un visuel est inséré à la place n : les suivants descendent d'une place avec leurs réglages ; il reprend ceux du
+    visuel « depuis » (la copie a la même position relative et la même taille que l'original)."""
+    for k in range(af.MAX_VISUELS, n, -1):
+        reglages[_cle_visuel(k)] = dict(reglages.get(_cle_visuel(k - 1)) or af.reglages_defaut()[_cle_visuel(k - 1)])
+    reglages[_cle_visuel(n)] = dict(depuis)
+
+
+def dupliquer_visuel(ss, n):
+    """Copie le visuel n de l'affiche (à partir de 1, le visuel principal d'abord) : la copie se place juste après lui,
+    avec les mêmes réglages. Retourne un message si ce n'est pas possible, sinon None."""
+    extras = list(ss.get("extras") or [])
+    if 1 + len(extras) >= af.MAX_VISUELS:
+        return f"Une affiche porte au plus {af.MAX_VISUELS} images."
+    finaux = ss.get("visuels_finaux") or []
+    if not (1 <= n <= len(finaux)) or finaux[n - 1] is None:
+        return "Cette image n'est pas encore prête à être dupliquée."
+    source = extras[n - 2] if n >= 2 else {"nom": "", "code": ss.get("code", "")}
+    ss["extra_uid"] = ss.get("extra_uid", 0) + 1  # même compteur que les images ajoutées depuis le formulaire
+    copie = {"uid": ss["extra_uid"], "image": finaux[n - 1], "nom": source.get("nom", ""),
+             "code": source.get("code", ""), "traite": True}
+    extras.insert(n - 1, copie)  # n - 1 : juste après le visuel n (le principal n'est pas dans la liste)
+    ss["extras"] = extras
+    reglages = ss["reglages"]
+    depuis = dict(reglages.get(_cle_visuel(n)) or af.reglages_defaut()[_cle_visuel(n)])
+    inserer_reglage_visuel(reglages, n + 1, depuis)
+    return None
+
+
+def retirer_visuel(ss, n):
+    """Retire de l'affiche le visuel n (2 au plus : le principal se change dans le formulaire)."""
+    extras = list(ss.get("extras") or [])
+    if not (2 <= n <= 1 + len(extras)):
+        return
+    del extras[n - 2]
+    ss["extras"] = extras
+    retirer_reglage_visuel(ss["reglages"], n)
 
 
 # ----------------------------------------------------------------------------
@@ -458,6 +532,19 @@ def _appliquer(ss, ev):
     elif action == "reinit" and not libre:
         ss["reglages"][el] = af.reglages_defaut()[el]
         ss["ver"] = ss.get("ver", 0) + 1
+    elif action == "dupliquer" and el in af.VISUELS:
+        message = dupliquer_visuel(ss, numero_visuel(el))
+        if message:
+            ss["msg_alerte"] = message
+        else:
+            ss["msg_ouvert"] = "Image dupliquée : la copie est juste après l'original. Glisser pour la placer."
+            _selectionner(ss, _cle_visuel(numero_visuel(el) + 1))
+            ss["ver"] = ss.get("ver", 0) + 1
+    elif action == "regrouper" and el in af.VISUELS:
+        for k in range(1, af.MAX_VISUELS + 1):
+            ss["reglages"][_cle_visuel(k)] = dict(af.reglages_defaut()[_cle_visuel(k)])
+        ss["reglages"]["image"] = dict(af.reglages_defaut()["image"])
+        ss["ver"] = ss.get("ver", 0) + 1
     elif action == "dupliquer" and libre:
         e = next(x for x in ss["elements"] if x["id"] == ident)
         if len(ss["elements"]) >= libres.MAX_ELEMENTS:
@@ -474,6 +561,11 @@ def _appliquer(ss, ev):
         ss["element_libre_actif"] = restants[min(ids.index(ident), len(restants) - 1)]["id"] if restants else None
         ss["selection_libre"] = False
         ss["selection_apercu"] = False
+        ss["ver"] = ss.get("ver", 0) + 1
+    elif action == "supprimer" and el in af.VISUELS and el != "image":
+        retirer_visuel(ss, numero_visuel(el))
+        ss["selection_apercu"] = False
+        ss["msg_ouvert"] = "Image retirée de l'affiche. Pour la remettre : Annuler."
         ss["ver"] = ss.get("ver", 0) + 1
     elif action == "supprimer" and el in SUPPRIMABLES:
         standard = ss.get("w_promo_type", "standard") == "standard"

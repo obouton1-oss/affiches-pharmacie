@@ -714,7 +714,10 @@ def ajouter_extra(img, code="", nom="", traite=False):
 
 
 def retirer_extra(uid):
+    rang = next((i for i, x in enumerate(ss.extras) if x["uid"] == uid), None)
     ss.extras = [x for x in ss.extras if x["uid"] != uid]
+    if rang is not None:  # les images suivantes remontent d'une place avec leurs positions et tailles
+        retouches.retirer_reglage_visuel(ss.reglages, rang + 2)
 
 
 # --- « Nouvelle affiche » : efface la saisie en cours, garde les réglages (format, police, couleurs, logo)
@@ -798,6 +801,7 @@ def nouvelle_affiche(garder_serie=False):
     ss.props_choisie, ss.props_ouvertes = None, True
     ss.derniere_collee = ss.derniere_collee_extra = None
     ss.extras, ss.ajout_extra, ss.cand_extra, ss.derniere_sel_extra = [], False, None, None
+    ss.visuels_finaux = []
     ss.televerse_vu = None
     ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
     ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = True, "Rapide", False
@@ -1023,7 +1027,8 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
         st.markdown(f"**Autres images sur l'affiche** · {1 + len(ss.extras)} sur {MAX_VISUELS}")
         if not ss.extras and not ss.ajout_extra:
             st.caption(f"Pour présenter une gamme : jusqu'à {MAX_VISUELS - 1} autres produits, affichés côte à côte "
-                       "avec le premier sur une seule rangée.")
+                       "avec le premier sur une seule rangée. Sur l'aperçu, chaque image se déplace et s'agrandit "
+                       "séparément ; le bouton « Dupliquer » de la barre en fait une copie.")
         if ss.extras:
             with st.spinner("Préparation des visuels…"):
                 colonnes = st.columns(MAX_VISUELS - 1)
@@ -1704,6 +1709,7 @@ with col_apercu:
             if visuel is None and avec_photo:
                 st.warning("Aucun visuel : l'affiche sera générée sans image.")
             dates_txt = libelle_dates(debut, fin) if avec_dates else ""
+            ss.visuels_finaux = [visuel] + list(autres_visuels)  # pour dupliquer une image depuis la barre de l'aperçu
             unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, [visuel] + autres_visuels, logo,
                                      reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo,
                                      identite=IDENTITE, logo_marque=logo_marque_img, elements=ss.elements)
