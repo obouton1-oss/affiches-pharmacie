@@ -131,6 +131,7 @@ const P = {
   curseur:'<path d="M5 3l6 16 2.4-6.6L20 10z"/>', aa:'<path d="M3 19 8 6l5 13M4.8 14.5h6.4"/><path d="M15 12.5a2.8 2.8 0 1 1 0 5.6 2.8 2.8 0 0 1 0-5.6zM17.8 11.5V19"/>',
   maj:'<path d="M3 19 7.5 6 12 19M4.6 14.5h5.8M13 19l4.5-13L22 19M14.6 14.5h5.8"/>', fleche:'<path d="m6 9 6 6 6-6"/>',
   coche:'<path d="m5 12 5 5L20 7"/>',
+  cadre:'<rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/><path d="M8 12h8" stroke-opacity=".55"/>',
   seau:'<path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2a2 2 0 0 0 2.8 0L19 11z"/><path d="M5 2l5 5M2 13h15"/><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4z"/>'
 };
 function ico(nom, t){ t = t || 16;
@@ -440,6 +441,16 @@ function construireBarre(){
         sans.appendChild(el("div", "pop-sep"));
         ouvrirPop(b, palette("Couleurs du fond", f.actif ? f.couleur : null, c => maj("couleur_fond", c), sans));
       }, "bord"));
+  }
+  if(o.cadre){
+    const cd = o.cadre, avec = cd.forme && cd.forme !== "aucun";
+    outilsEl.appendChild(bouton(ico("cadre", 16) + ico("fleche", 14),
+      "Cadre autour du texte" + (avec ? " (" + ((args.cadres_texte || {})[cd.forme] || cd.forme) + ")" : " (aucun)"), b => {
+        const formes = el("div"); formes.appendChild(el("div", "pop-titre", "Cadre autour du texte"));
+        for(const [k, v] of Object.entries(args.cadres_texte || {})) formes.appendChild(item(null, v, () => maj("cadre", k), k === (cd.forme || "aucun") ? "on" : ""));
+        formes.appendChild(el("div", "pop-sep"));
+        ouvrirPop(b, palette("Couleur du cadre", avec ? cd.couleur : null, c => maj("couleur_cadre", c), formes));
+      }, "bord" + (avec ? " on" : "")));
   }
   if(o.forme){
     outilsEl.appendChild(bouton(ico("forme", 15) + ico("fleche", 14), "Changer de forme", b => {

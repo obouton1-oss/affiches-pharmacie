@@ -13,6 +13,7 @@ Un élément est un dictionnaire simple, enregistré tel quel avec l'affiche dan
   gras, italique, souligne   style du texte, du prix ou du texte écrit dans la forme (gras par défaut)
   t         corps du texte ou du prix, en fraction du petit côté de la page (types texte et prix)
   fond, couleur_fond   prix sur fond coloré (type prix)
+  cadre, couleur_cadre  cadre autour du texte ou du prix (voir affiche.CADRES ; « aucun » par défaut) et sa couleur
   forme     rectangle, arrondi, carre, rond, ovale, triangle, losange, fleche, etoile, explosion, coeur, croix
   l, h      largeur et hauteur, en fraction du petit côté de la page (type forme ; h = l pour une forme à proportions fixes)
 
@@ -77,6 +78,9 @@ def element_valide(e):
          "police": e["police"] if isinstance(e.get("police"), str) and e["police"] in af.POLICES else None,
          "gras": bool(e.get("gras", True)), "italique": bool(e.get("italique", False)),
          "souligne": bool(e.get("souligne", False))}
+    if type_ in ("texte", "prix"):  # cadre en option autour du texte ou du prix (aucun par défaut)
+        r.update(cadre=e["cadre"] if e.get("cadre") in af.CADRES else "aucun",
+                 couleur_cadre=_couleur(e.get("couleur_cadre"), r["couleur"]))
     if type_ == "texte":
         r.update(texte=texte[:200], t=_nombre(e.get("t"), 0.07, 0.02, 0.5))
     elif type_ == "prix":
@@ -209,7 +213,10 @@ def mise_en_page(e, largeur_page, hauteur_page, petit_cote, style) -> dict:
         largeur = e["l"] * petit_cote
         g.update(w=largeur, h=largeur if not FORMES[e["forme"]][1] else e["h"] * petit_cote, police=police,
                  hc=af._hauteur_chiffre(police))
-    g["bbox"] = _englobant(cx, cy, g["w"], g["h"], e["rot"])
+    g["S"] = petit_cote
+    g["marge_cadre"] = af.marge_cadre_texte(petit_cote) if e.get("cadre", "aucun") != "aucun" and not g["vide"] else 0.0
+    mg = g["marge_cadre"]
+    g["bbox"] = _englobant(cx, cy, g["w"] + 2 * mg, g["h"] + 2 * mg, e["rot"])
     return g
 
 
@@ -331,6 +338,10 @@ def dessiner(c, g, style=None) -> None:
         c.setFillColor(couleur)
         _forme(c, e["forme"], g["w"], g["h"])
         _texte_dans_forme(c, g)
+    if g.get("marge_cadre"):  # cadre autour du texte ou du prix
+        mg = g["marge_cadre"]
+        af.contour(c, -g["w"] / 2 - mg, -g["h"] / 2 - mg, g["w"] + 2 * mg, g["h"] + 2 * mg, e["cadre"],
+                   HexColor(e["couleur_cadre"]), g["S"])
     c.restoreState()
 
 

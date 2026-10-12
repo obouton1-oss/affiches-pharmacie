@@ -37,7 +37,7 @@ import pharmacie
 import preferences
 import types_affiche
 from chemins import EN_LIGNE
-from affiche import (CADRES, DOSSIER_POLICES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, TEXTES, THEMES, apercu_png,
+from affiche import (CADRES, CADRES_TEXTE, DOSSIER_POLICES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, TEXTES, THEMES, apercu_png,
                      couleur_detail, couleur_kicker,
                      disposition_a4, libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut,
                      textes_valides)
@@ -233,6 +233,8 @@ def maj_texte(texte, cle_police, cle_style):
     styles = ss[cle_style] or []
     brut = {"police": ss[cle_police] if ss[cle_police] in POLICES else None, "gras": "gras" in styles,
             "italique": "italique" in styles, "souligne": "souligne" in styles}
+    propre = textes_valides(ss.style.get("textes")).get(texte, {})  # le cadre choisi sur l'aperçu est conservé
+    brut.update({k: propre[k] for k in ("cadre", "couleur_cadre") if k in propre})
     ss.style["textes"] = textes_valides({**(ss.style.get("textes") or {}), texte: brut})
     ss.ver += 1  # le même réglage est aussi proposé ailleurs (sous le champ de saisie, « Police et couleurs ») : à jour partout
 
@@ -1733,7 +1735,7 @@ with col_apercu:
                                                     logo_marque=logo_marque_img is not None),
                             polices=POLICES, police_affiche=ss.style["police"], themes=list(THEMES),
                             couleurs=retouches.couleurs_affiche(ss),
-                            formes={k: v[0] for k, v in libres.FORMES.items()},
+                            formes={k: v[0] for k, v in libres.FORMES.items()}, cadres_texte=CADRES_TEXTE,
                             plein=len(ss.elements) >= libres.MAX_ELEMENTS,
                             annuler=retouches.peut_annuler(ss), retablir=retouches.peut_retablir(ss),
                             traites=retouches.traites(ss),

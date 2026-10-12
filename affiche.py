@@ -124,9 +124,22 @@ def textes_valides(brut) -> dict:
             v["italique"] = True
         if r.get("souligne"):
             v["souligne"] = True
+        # cadre autour du texte (en option : aucun par défaut) et sa couleur (vide = celle du texte)
+        if r.get("cadre") in CADRES and r["cadre"] != "aucun":
+            v["cadre"] = r["cadre"]
+            c = r.get("couleur_cadre")
+            if isinstance(c, str) and re.match(r"^#[0-9A-Fa-f]{6}$", c):
+                v["couleur_cadre"] = c.upper()
         if v:
             res[texte] = v
     return res
+
+
+def cadre_texte(st, texte):
+    """(forme du cadre, couleur hexadécimale ou None = celle du texte) autour d'un texte de l'affiche ; forme « aucun »
+    sans cadre (cas par défaut). Le petit texte de l'offre n'hérite pas du cadre du prix."""
+    r = textes_valides(st.get("textes")).get(texte, {})
+    return r.get("cadre", "aucun"), r.get("couleur_cadre")
 
 
 def police_texte(st, texte):
@@ -139,6 +152,8 @@ def police_texte(st, texte):
 # Cadre autour de l'affiche : en option seulement (aucun par défaut)
 CADRES = {"aucun": "Aucun cadre", "fin": "Trait fin", "epais": "Trait épais", "double": "Double trait",
           "arrondi": "Coins arrondis", "pointille": "Pointillés", "coins": "Coins seulement"}
+# Cadre autour d'un texte (barre au-dessus de l'aperçu) : les mêmes styles, « Sans cadre » par défaut
+CADRES_TEXTE = {"aucun": "Sans cadre", **{k: v for k, v in CADRES.items() if k != "aucun"}}
 THEMES = {
     "Impact (prix noir sur jaune)": {"couleur_nom": "#175848", "couleur_prix": "#000000",
                                      "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
@@ -537,6 +552,53 @@ def _dessiner_cadre(c, W, H, S, cadre, couleur):
         c.setLineWidth(S * 0.009)
         c.setLineCap(0)
         b = S * 0.12  # longueur de chaque branche
+        for (x, y, sx, sy) in ((x0, y0, 1, 1), (x0 + w, y0, -1, 1), (x0, y0 + h, 1, -1), (x0 + w, y0 + h, -1, -1)):
+            chemin = c.beginPath()
+            chemin.moveTo(x, y + sy * b)
+            chemin.lineTo(x, y)
+            chemin.lineTo(x + sx * b, y)
+            c.drawPath(chemin, stroke=1, fill=0)
+    c.restoreState()
+
+
+def marge_cadre_texte(S):
+    """Écart entre un texte et son cadre (S : petit côté de la page)."""
+    return S * 0.014
+
+
+def contour(c, x0, y0, w, h, forme, couleur, S):
+    """Cadre de style `forme` (voir CADRES) autour du rectangle (x0, y0, w, h), dans la couleur donnée. Les épaisseurs
+    dépendent du petit côté de la page S (comme le cadre de l'affiche, en plus fin)."""
+    if forme not in CADRES or forme == "aucun" or w <= 0 or h <= 0:
+        return
+    c.saveState()
+    c.setStrokeColor(couleur)
+    c.setLineJoin(0)
+    if forme == "fin":
+        c.setLineWidth(max(0.6, S * 0.0025))
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif forme == "epais":
+        c.setLineWidth(S * 0.007)
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif forme == "double":
+        c.setLineWidth(S * 0.004)
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+        e = S * 0.007
+        c.setLineWidth(max(0.5, S * 0.0016))
+        c.rect(x0 + e, y0 + e, w - 2 * e, h - 2 * e, stroke=1, fill=0)
+    elif forme == "arrondi":
+        c.setLineWidth(S * 0.005)
+        c.roundRect(x0, y0, w, h, min(h / 2, w / 2, S * 0.03), stroke=1, fill=0)
+    elif forme == "pointille":
+        ep = S * 0.005
+        c.setLineWidth(ep)
+        c.setLineCap(1)
+        c.setDash(0.01, ep * 2.6)  # points ronds
+        c.rect(x0, y0, w, h, stroke=1, fill=0)
+    elif forme == "coins":
+        c.setLineWidth(S * 0.006)
+        c.setLineCap(0)
+        b = min(w, h) * 0.35
         for (x, y, sx, sy) in ((x0, y0, 1, 1), (x0 + w, y0, -1, 1), (x0, y0 + h, 1, -1), (x0 + w, y0 + h, -1, -1)):
             chemin = c.beginPath()
             chemin.moveTo(x, y + sy * b)
@@ -952,6 +1014,19 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         c.drawString(x_g + w_logo + ecart, cy - ts * 0.3, nom_pharmacie)
         h_cadre = h_logo if logo_img is not None else max(ts * 1.4, 1.0)
         cadres["logo"] = (x_g, cy - h_cadre / 2, x_g + gw, cy + h_cadre / 2)
+
+    # ---- Cadres autour des textes (en option) : le cadre entoure le texte, avec une petite marge
+    couleurs_texte = {"marque": col_nom, "detail": col_det, "prix": col_prix, "kicker": col_kicker,
+                      "prix_barre": col_sec, "ligne": col_nom, "dates": col_sec}
+    for el in TEXTES:
+        forme_c, couleur_c = cadre_texte(st, el)
+        if forme_c == "aucun" or el not in cadres:
+            continue
+        x0, y0, x1, y1 = cadres[el]
+        mg = marge_cadre_texte(S)
+        x0, y0, x1, y1 = x0 - mg, y0 - mg, x1 + mg, y1 + mg
+        contour(c, x0, y0, x1 - x0, y1 - y0, forme_c, HexColor(couleur_c) if couleur_c else couleurs_texte[el], S)
+        cadres[el] = (x0, y0, x1, y1)
 
     for g in libres:  # éléments de devant : au-dessus de tout, le cadre de l'affiche mis à part
         if g["e"]["devant"]:

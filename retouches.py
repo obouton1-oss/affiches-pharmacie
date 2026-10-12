@@ -146,11 +146,17 @@ def peut_retablir(ss):
 # ----------------------------------------------------------------------------
 def _style_texte(style, texte):
     textes = af.textes_valides(style.get("textes"))
+    propre = textes.get(texte, {})  # le cadre reste propre à chaque texte (le petit texte de l'offre n'hérite pas)
     if texte == "kicker" and "kicker" not in textes:  # le petit texte de l'offre suit le prix tant qu'il n'a pas son style
         texte = "prix"
     etat = textes.get(texte, {})
-    return {"police": etat.get("police"), "gras": etat.get("gras", af.TEXTES[texte][1]),
-            "italique": etat.get("italique", False), "souligne": etat.get("souligne", False)}
+    res = {"police": etat.get("police"), "gras": etat.get("gras", af.TEXTES[texte][1]),
+           "italique": etat.get("italique", False), "souligne": etat.get("souligne", False)}
+    if propre.get("cadre"):
+        res["cadre"] = propre["cadre"]
+        if propre.get("couleur_cadre"):
+            res["couleur_cadre"] = propre["couleur_cadre"]
+    return res
 
 
 def _couleur_style(style, cle):
@@ -172,7 +178,11 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
                 o["titre"] = "Logo de la marque"
                 o["actions"].append("texte_marque")
             elif el in af.TEXTES:
-                o["styles"] = _style_texte(style, el)
+                o["styles"] = {k: v for k, v in _style_texte(style, el).items() if k not in ("cadre", "couleur_cadre")}
+            if el in af.TEXTES:  # cadre en option autour du texte (aussi autour du logo de la marque)
+                forme_c, couleur_c = af.cadre_texte(style, el)
+                o["cadre"] = {"forme": forme_c,
+                              "couleur": couleur_c or _couleur_texte(style, el, logo_marque)}
             if el in COULEUR_ELEMENT and not (el == "marque" and logo_marque):
                 o["couleur"] = _couleur_style(style, COULEUR_ELEMENT[el])
                 if el in PARTAGE:
@@ -224,11 +234,20 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
                 o["texte"] = {"valeur": e["texte"], "multi": False, "max": 60,
                               "indication": "Texte dans la forme (facultatif)"}
                 o["forme"] = e["forme"]
+            if e["type"] in ("texte", "prix"):
+                o["cadre"] = {"forme": e.get("cadre", "aucun"), "couleur": e.get("couleur_cadre") or e["couleur"]}
             if e["type"] != "forme" or e["texte"].strip():
                 o["styles"] = {"police": e["police"], "gras": e["gras"], "italique": e["italique"],
                                "souligne": e["souligne"]}
             res[el] = o
     return res
+
+
+def _couleur_texte(style, el, logo_marque=False):
+    """Couleur d'un texte de l'affiche (celle de son cadre tant qu'aucune autre n'est choisie)."""
+    if el == "marque" and logo_marque:
+        return _couleur_style(style, "couleur_nom")
+    return _couleur_style(style, COULEUR_ELEMENT.get(el, "couleur_nom"))
 
 
 def couleurs_affiche(ss):
@@ -329,8 +348,27 @@ def _modif_styles(champ, valeur):
     return None
 
 
+def _maj_cadre(actuel, champ, valeur):
+    """Nouveau (forme, couleur) d'un cadre de texte. Choisir une couleur sans cadre pose un trait fin.
+    Retourne None si la valeur n'est pas reconnue."""
+    forme, couleur = actuel
+    if champ == "cadre":
+        return (valeur, couleur) if valeur in af.CADRES else None
+    c = _hex(valeur)
+    if c is None:
+        return None
+    return (forme if forme != "aucun" else "fin"), c
+
+
 def _maj_standard(ss, el, champ, valeur):
     style = ss["style"]
+    if champ in ("cadre", "couleur_cadre"):
+        if el not in af.TEXTES:
+            return
+        nouveau = _maj_cadre(af.cadre_texte(style, el), champ, valeur)
+        if nouveau is not None:
+            _maj_texte_style(ss, el, {"cadre": nouveau[0], "couleur_cadre": nouveau[1]})
+        return
     if champ == "texte":
         texte = str(valeur or "").replace("\r", "")
         if el == "marque":
@@ -373,6 +411,13 @@ def _maj_libre(ss, ident, champ, valeur):
     if e is None:
         return
     modif = _modif_styles(champ, valeur)
+    if champ in ("cadre", "couleur_cadre"):
+        if e["type"] not in ("texte", "prix"):
+            return
+        nouveau = _maj_cadre((e.get("cadre", "aucun"), e.get("couleur_cadre")), champ, valeur)
+        if nouveau is None:
+            return
+        modif = {"cadre": nouveau[0], "couleur_cadre": nouveau[1] or e["couleur"]}
     if modif is None:
         if champ in ("texte", "forme"):
             modif = {champ: str(valeur or "")}
