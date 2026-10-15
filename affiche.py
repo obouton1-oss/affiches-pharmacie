@@ -287,6 +287,19 @@ def _ajuster_titre(texte, police, largeur, hauteur, taille_max, max_lignes=3, eq
     return _lignes_auto(texte, police, 6, largeur), 6
 
 
+def _relignes(texte, police, taille, largeur, equilibre=False):
+    """Lignes d'un texte redimensionné à la main (taille `taille`) : les mots sont répartis de nouveau dans la largeur
+    disponible. Réduire un texte coupé en deux le remet sur une seule ligne dès qu'il y tient ; les retours à la ligne
+    saisis sont respectés."""
+    forcees = [l.strip() for l in texte.split("\n") if l.strip()]
+    if len(forcees) > 1:
+        return [p for l in forcees for p in _lignes_auto(l, police, taille, largeur)]
+    lignes = _lignes_auto(texte.replace("\n", " "), police, taille, largeur)
+    if equilibre and len(lignes) > 1:
+        lignes = _equilibrer(texte.replace("\n", " "), police, taille, largeur, len(lignes))
+    return lignes or [texte.strip() or " "]
+
+
 def _prix_parts(p: Decimal):
     ent, cts = divmod(int(p * 100), 100)
     return str(ent), (f"{cts:02d}" if cts else "")
@@ -363,8 +376,8 @@ def _dessiner_prix(c, p, cx, base_y, taille, gras=GRAS, couleur=VERT, hc=0.72, i
 # ----------------------------------------------------------------------------
 # Autres types de promotion : texte principal, petit texte au-dessus, pastille
 # ----------------------------------------------------------------------------
-K_TAILLE = 0.30   # corps du petit texte au-dessus du prix, en fraction du corps du prix
-K_ECART = 0.16    # espace entre le prix et le petit texte, en fraction du corps du prix
+K_TAILLE = 0.34   # corps du petit texte au-dessus du prix, en fraction du corps du prix
+K_ECART = 0.26    # espace entre le prix et le petit texte, en fraction du corps du prix
 SUP_TAILLE = 0.62  # corps d'un exposant (« e » de 2e), en fraction du corps du texte
 _EXPOSANT = re.compile(r"\^\{([^}]*)\}")
 
@@ -891,13 +904,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         cadres["marque"] = (cx - wl / 2, cy - hl / 2, cx + wl / 2, cy + hl / 2)
 
     # ---- Marque puis détail
-    for el, lignes, taille, bloc, y_bloc, police, ital, soul in (
-            ("marque", l_marque, t_marque, bloc_m, y_marque, f_marque, i_marque, u_marque),
-            ("detail", l_detail, t_detail, bloc_d, y_detail, f_detail, i_detail, u_detail)):
+    for el, lignes, taille, bloc, y_bloc, police, ital, soul, texte_el in (
+            ("marque", l_marque, t_marque, bloc_m, y_marque, f_marque, i_marque, u_marque, texte_marque),
+            ("detail", l_detail, t_detail, bloc_d, y_detail, f_detail, i_detail, u_detail, detail)):
         if not lignes:
             continue
         dx, dy, s = _reg(reglages, el)
         t = taille * s
+        if abs(s - 1) > 1e-9:  # taille changée à la main : les mots sont répartis de nouveau sur la largeur utile
+            lignes = _relignes(texte_el, police, t, zone_w, equilibre=paysage)
         hb = len(lignes) * t * 1.15
         cx = cx_t + dx * W
         cy = (y_bloc + bloc / 2) + dy * H
