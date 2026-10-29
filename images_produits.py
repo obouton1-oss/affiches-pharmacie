@@ -7,8 +7,10 @@ Ordre de recherche :
   4. Recherche web VÉRIFIÉE (rechercher_visuels) : des moteurs de recherche trouvent des pages qui citent le code ;
      chaque page est ouverte et ne compte que si le code y figure réellement. Aucune liste de sites n'est figée :
      un site qui change d'adresse est retrouvé par le moteur, une page qui ne répond plus est ignorée.
-     À défaut : pages dont le nom du produit correspond (« probable »), puis images web dont le titre cite le code
-     ou correspond au nom du produit (jamais d'images sans rapport avec lui).
+     Les images des moteurs de recherche d'images (DuckDuckGo et Bing Images) dont le titre ou l'adresse cite le
+     code ou reprend le nom, et la photo des bases (3), sont mises en concurrence avec celles des pages : toutes
+     sont téléchargées et jugées (fond blanc, netteté réelle, produit seul), les doublons retirés, et les plus
+     belles proposées d'abord (jamais d'images sans rapport avec le produit).
   5. Import ou collage manuel d'une image (collage depuis le presse-papiers, glisser-déposer, fichier).
 Stockage : aucune image trouvée, choisie ou collée n'est conservée sur le disque. Seuls les visuels des affiches
 enregistrées le sont, dans l'historique (voir historique.py) ; supprimer l'affiche supprime ses visuels.
@@ -56,7 +58,15 @@ DELAI_AGRANDIR = 10               # secondes accordées à la recherche des vers
 DOMAINES_IGNORES = ("google.", "facebook.", "instagram.", "pinterest.", "youtube.", "youtu.be", "tiktok.",
                     "twitter.", "x.com", "linkedin.", "reddit.", "amazon.", "ebay.", "aliexpress.", "leboncoin.",
                     "wikipedia.", "duckduckgo.", "bing.com")
-RANG_NIVEAU = {"nom": 0, "moyen": 1, "fort": 2}
+# Confiance dans l'identité du produit montré par une photo, de la plus faible à la plus forte :
+#   titre  : image du web dont le titre reprend le nom du produit (page non vérifiée) ;
+#   nom    : page dont le nom correspond, sans le code ;
+#   indice : image du web dont le titre ou l'adresse cite le code (page non vérifiée) ;
+#   moyen  : page qui contient le code dans son texte ;  fort : code dans l'adresse, le titre ou les données produit ;
+#   base   : photo des bases Open Facts, rangée sous ce code.
+RANG_NIVEAU = {"titre": 0, "nom": 1, "indice": 2, "moyen": 3, "fort": 4, "base": 4}
+NIVEAUX_VERIFIES = ("moyen", "fort", "base")  # le code du produit est confirmé
+NOMBRE_PROPOSEES = 4  # photos montrées d'office (les autres sur demande)
 IMAGE_A_IGNORER = re.compile(r"logo|sprite|favicon|placeholder|no-?image|spacer|\.svg|\.gif(\?|$)", re.I)
 CODES_REFUS = (401, 403, 406, 429, 451, 503)  # réponses d'un site qui refuse les programmes : 2e essai « en navigateur »
 
@@ -521,13 +531,16 @@ def rechercher(code: str):
             continue
         try:
             img = telecharger_image(url)
+            url_finale = url
             try:  # la base donne une version réduite (400 px) : la photo d'origine est demandée
                 mieux = version_grande(url, img)
                 if mieux:
                     img = image_depuis_octets(mieux["octets"])
+                    url_finale = mieux["url"]
             except Exception:
                 pass
             img = rogner_marges_blanches(img)
+            img.info["source"], img.info["url"] = source, url_finale  # pour la mise en concurrence (candidat_base)
             journal.append(f"{source} : visuel obtenu ({max(img.size)} px).")
         except Exception as e:
             journal.append(f"{source} : téléchargement du visuel impossible ({type(e).__name__}).")
@@ -557,6 +570,48 @@ def analyser_image(img: Image.Image) -> dict:
                     blancs += 1
     part = blancs / max(1, total)
     return {"blanc": part, "studio": part >= 0.90, "cote_min": cote_min}
+
+
+def produit_seul(img: Image.Image) -> dict:
+    """Le produit est-il seul sur la photo, sans « parasites » ? On isole ce qui se détache du fond blanc (image
+    réduite à 200 px, petits trous refermés) et on compte les objets :
+      objets   : objets importants (au moins 6 % de la surface non blanche) : 1 = produit seul ; 2 = produit et sa
+                 boîte, ou deux produits ; 3 et plus = lot, gamme, mise en scène ;
+      pastilles: petits éléments colorés détachés du produit (pastille « promo », « -30 % », étiquette de prix) ;
+      seul     : note de 0 à 1 (1 = produit seul, sans pastille).
+    Une photo sans fond blanc (mise en scène, produit tenu à la main) n'est pas analysable ainsi : seul = 0,5
+    (c'est la note de fond blanc qui la pénalise). Sans OpenCV, seul = 1 (aucune pénalité)."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return {"objets": 1, "pastilles": 0, "seul": 1.0}
+    petit = img.convert("RGB").copy()
+    petit.thumbnail((200, 200))
+    a = np.asarray(petit, dtype=np.int16)
+    mini, maxi = a.min(axis=2), a.max(axis=2)
+    masque = ((mini < 232) | (maxi - mini > 28)).astype(np.uint8)  # ni blanc ni gris très clair
+    total = int(masque.sum())
+    if total < 0.01 * masque.size:
+        return {"objets": 0, "pastilles": 0, "seul": 0.0}  # image presque vide
+    if total > 0.85 * masque.size:
+        return {"objets": 1, "pastilles": 0, "seul": 0.5}  # pas de fond blanc : non analysable
+    masque = cv2.morphologyEx(masque, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))  # étiquette blanche, reflets
+    n, _etiq, stats, _ = cv2.connectedComponentsWithStats(masque, connectivity=8)
+    aires = sorted((int(stats[i, cv2.CC_STAT_AREA]), i) for i in range(1, n))
+    aire_totale = sum(x for x, _ in aires) or 1
+    objets = [i for x, i in aires if x >= 0.06 * aire_totale]
+    pastilles = 0
+    sat = (maxi - mini)
+    for x, i in aires:
+        if 0.004 * aire_totale <= x < 0.06 * aire_totale:
+            zone = _etiq == i
+            if float(sat[zone].mean()) > 60:  # petit élément très coloré, détaché du produit
+                pastilles += 1
+    nb = len(objets)
+    seul = 1.0 if nb == 1 else 0.6 if nb == 2 else 0.25
+    seul = max(0.0, seul - 0.2 * min(pastilles, 3))
+    return {"objets": nb, "pastilles": pastilles, "seul": seul}
 
 
 def _mots_utiles(texte: str):
@@ -600,19 +655,47 @@ def _texte_bing(requete):
     return [{"title": r.title, "href": r.href, "body": r.body} for r in res]
 
 
+def _images_bing(requete):
+    """Recherche d'images par Bing Images, directement (moteur fourni avec ddgs mais désactivé par défaut) : un
+    2e moteur d'images, interrogé en plus de celui de ddgs (DuckDuckGo), pour trouver davantage de photos."""
+    from ddgs.engines.bing_images import BingImages
+    res = BingImages(timeout=8).search(requete, region="fr-fr", max_results=35)
+    if not res:
+        raise ValueError("aucun résultat ou réponse refusée")
+    return [{"title": r.title, "image": r.image, "thumbnail": r.thumbnail, "url": r.url, "width": r.width,
+             "height": r.height, "moteur": "bing"} for r in res]
+
+
 def _recherches(methode, requetes, **options):
     """Plusieurs recherches, 3 à la fois. Retourne (liste de résultats par requête, incidents lisibles).
     Recherche de pages (« text ») : si les moteurs de ddgs échouent, Bing est interrogé directement ; dès qu'ils
-    échouent pour une autre raison qu'une absence de résultat, ils ne sont plus sollicités pour les requêtes suivantes."""
+    échouent pour une autre raison qu'une absence de résultat, ils ne sont plus sollicités pour les requêtes suivantes.
+    Recherche d'images : deux moteurs à chaque fois, celui de ddgs (DuckDuckGo) et Bing Images ; leurs résultats
+    sont réunis (les doublons sont retirés ensuite)."""
     try:
         importlib.import_module("ddgs")
     except Exception:
         return [], ["module de recherche web non installé (ddgs)"]
     erreurs = []
-    etat = {"ddgs_ko": False, "bing": 0}
+    etat = {"ddgs_ko": False, "bing": 0, "bing_images": 0}
 
     def une(req):
         cause = ""
+        if methode == "images":
+            res = []
+            try:
+                res += _ddgs(methode, req, **options)
+            except Exception as e:
+                cause = "ddgs " + _detail_erreur(e)
+            try:
+                trouves = _images_bing(req)
+                etat["bing_images"] += len(trouves)
+                res += trouves
+            except Exception as e:
+                cause = (cause + " ; " if cause else "") + "Bing Images " + _detail_erreur(e)
+            if cause and not res:
+                erreurs.append(f"« {req[:30]} » — {cause}")
+            return res
         if not (methode == "text" and etat["ddgs_ko"]):
             try:
                 return _ddgs(methode, req, **options)
@@ -1120,17 +1203,103 @@ def _evaluer_image(url, page, rang=0):
 
 def _candidat(url, octets, rgb, produit, page, rang=0):
     a = analyser_image(rgb)
+    q = produit_seul(rgb)
     mini = rgb.copy()
     mini.thumbnail((320, 320))
     return {"miniature": mini, "image": url, "octets": octets if len(octets) <= 2_500_000 else None,
             "titre": page.get("nom", ""), "site": page["site"], "page": page["url"],
             "largeur": produit.width, "hauteur": produit.height, "nette": resolution_effective(produit),
-            "blanc": a["blanc"], "studio": a["studio"],
-            "verifie": page["niveau"] != "nom", "niveau": page["niveau"], "sites": {page["site"]},
-            "principale": rang == 0, "_h": _empreinte(produit), "_sources": [(url, page)]}
+            "blanc": a["blanc"], "studio": a["studio"], "seul": q["seul"], "objets": q["objets"],
+            "pastilles": q["pastilles"],
+            "verifie": page["niveau"] in NIVEAUX_VERIFIES, "niveau": page["niveau"], "sites": {page["site"]},
+            "principale": rang == 0, "_h": _empreinte(produit), "_c": _empreinte_couleur(produit),
+            "_sources": [(url, page)]}
 
 
-_CHAMPS_PHOTO = ("miniature", "image", "octets", "page", "largeur", "hauteur", "nette", "blanc", "studio")
+_CHAMPS_PHOTO = ("miniature", "image", "octets", "page", "largeur", "hauteur", "nette", "blanc", "studio", "seul",
+                 "objets", "pastilles")
+
+
+def candidat_base(img: Image.Image, source: str = "", url: str = ""):
+    """Photo des bases Open Facts (déjà téléchargée) mise en concurrence avec celles du web : même évaluation
+    (netteté, fond blanc, produit seul). Son identité est sûre (elle est rangée sous le code du produit)."""
+    if img is None:
+        return None
+    rgb = vers_rgb_blanc(img)
+    tampon = io.BytesIO()
+    rgb.save(tampon, "JPEG", quality=95)
+    page = {"url": url, "site": source or "Base produits", "niveau": "base", "nom": ""}
+    c = _candidat(url or f"base:{source}", tampon.getvalue(), rgb, rogner_marges_blanches(rgb), page)
+    if not url:
+        c["_sources"] = []  # pas d'adresse : pas de recherche de version en grand
+    return c
+
+
+def _evaluer_image_web(r, niveau):
+    """Image d'un moteur de recherche d'images (page d'origine non vérifiée) : téléchargée en entier, pour être
+    jugée comme les autres. Si elle se révèle être la même photo qu'une photo confirmée par le code, elle s'y
+    rattache (et sa version la plus nette est gardée) : voir _classer."""
+    url = r.get("image")
+    page = {"url": r.get("url") or "", "site": _site(r.get("url") or url), "niveau": niveau,
+            "nom": r.get("title") or ""}
+    try:
+        octets = telecharger_octets(url, referer=page["url"], delai=(4, 10))
+        img = _ouvrir(octets)
+    except Exception:
+        return None
+    rgb = vers_rgb_blanc(img)
+    if max(rgb.size) > 3 * min(rgb.size):
+        return None
+    produit = rogner_marges_blanches(rgb)
+    if min(produit.size) < 40:
+        return None
+    return _candidat(url, octets, rgb, produit, page)
+
+
+def _candidats_web(bruts, code, nom="", deja=(), maxi=16):
+    """Images trouvées par les moteurs de recherche d'images, en rapport avec le produit (titre ou adresse citant
+    le code, ou titre reprenant le nom), téléchargées et évaluées en parallèle. deja : adresses déjà évaluées."""
+    motif = _motif_code(code)
+    mots = sorted(set(_mots_utiles(nom)))
+    vus, retenus = set(deja), []
+    for r in bruts:
+        url = r.get("image")
+        if not url or url in vus or not _url_publique(url) or IMAGE_A_IGNORER.search(url):
+            continue
+        vus.add(url)
+        texte = _texte_resultat(r)
+        cite_code = bool(motif.search(texte))
+        accord = 0.0
+        if len(mots) >= 2:
+            presents = set(_mots_utiles(texte))
+            accord = sum(1 for m in mots if m in presents) / len(mots)
+        if not cite_code and accord < ACCORD_TITRE_MIN:
+            continue  # sans rapport avec le produit
+        try:
+            w, h = int(r.get("width") or 0), int(r.get("height") or 0)
+        except (TypeError, ValueError):
+            w = h = 0
+        if w and h and max(w, h) < MIN_COTE_VERIFIE:
+            continue
+        retenus.append((0 if cite_code else 1, -accord, -(w * h), len(retenus), r, "indice" if cite_code else "titre"))
+    retenus.sort(key=lambda x: x[:4])
+    retenus = retenus[:maxi]
+    if not retenus:
+        return []
+    ex = ThreadPoolExecutor(max_workers=8)
+    futures = [ex.submit(_evaluer_image_web, x[4], x[5]) for x in retenus]
+    faits, _ = wait(futures, timeout=DELAI_ETAPE)
+    ex.shutdown(wait=False, cancel_futures=True)
+    sortie = []
+    for f in futures:
+        if f in faits:
+            try:
+                c = f.result()
+            except Exception:
+                c = None
+            if c:
+                sortie.append(c)
+    return sortie
 
 
 def _agrandir_candidat(c):
@@ -1157,7 +1326,7 @@ def _agrandir_candidat(c):
 
 
 def _candidats_de_pages(pages, maxi=30):
-    """Images des pages confirmées : téléchargées, dédoublonnées (même photo sur plusieurs sites), classées."""
+    """Images des pages examinées, téléchargées (non dédoublonnées : voir _classer)."""
     demandes, vus = [], set()
     for p in sorted(pages, key=lambda p: -RANG_NIVEAU[p["niveau"]]):
         for rang, u in enumerate(p["images"][:4]):
@@ -1180,13 +1349,42 @@ def _candidats_de_pages(pages, maxi=30):
                 c = None
             if c:
                 candidats.append(c)
-    # même photo sur plusieurs sites : on garde la version la plus nette (résolution réelle, fond blanc d'abord) ;
-    # les versions plus petites comptent quand même comme sites où la photo figure, et servent à chercher plus grand
+    return candidats
+
+
+# Note d'une photo. « Beauté » (0 à 100) : fond blanc uni (40), netteté réelle (35, pleine note à 1 200 px de
+# détails réels), produit seul sans pastille ni autre objet (25). Le classement y ajoute la confiance dans l'identité
+# du produit (code confirmé, nombre de sites), si bien qu'une belle photo dont le code n'est pas vérifié ne passe
+# devant une photo confirmée que si celle-ci est nettement moins belle.
+CONFIANCE = {"base": 30, "fort": 30, "moyen": 22, "indice": 10, "nom": 2, "titre": 0}
+BEAUTE_MINI = 35  # en dessous (photo floue, sans fond blanc, encombrée), une photo n'est montrée qu'à défaut
+
+
+def beaute(c) -> int:
+    return round(40 * c["blanc"] + 35 * min(1.0, c["nette"] / 1200) + 25 * c.get("seul", 1.0))
+
+
+def _noter(c):
+    c["beaute"] = beaute(c)
+    c["score"] = (c["beaute"] + CONFIANCE.get(c["niveau"], 0) + 12 * min(1.0, (len(c["sites"]) - 1) / 2)
+                  + (6 if c["principale"] else 0))  # photo principale d'une page, plutôt qu'une photo de galerie
+
+
+def _meme_photo(a, b) -> bool:
+    return _meme_image(a["_h"], b["_h"]) and _meme_image(a["_c"], b["_c"], 12.0)
+
+
+def _classer(candidats):
+    """Réunit les photos de toutes les sources (bases, pages vérifiées, moteurs d'images), retire les doublons
+    (même photo sur plusieurs sites : on garde la version la plus nette ; elle prend la confiance la plus forte
+    des sites où elle figure), cherche la version en grand des meilleures, puis classe."""
+    for c in candidats:
+        _noter(c)
     candidats.sort(key=lambda c: (-c["nette"] - 400 * c["studio"]))
     uniques = []
     for c in candidats:
         for u in uniques:
-            if _meme_image(u["_h"], c["_h"]):
+            if _meme_photo(u, c):
                 u["sites"] |= c["sites"]
                 u["_sources"] += c["_sources"]
                 u["principale"] = u["principale"] or c["principale"]
@@ -1195,19 +1393,11 @@ def _candidats_de_pages(pages, maxi=30):
                 break
         else:
             uniques.append(c)
-
-    def noter(c):
-        resolution = min(1.0, c["nette"] / 1000)  # grand côté réellement net : un flacon fin reste net
-        confiance = {"fort": 25, "moyen": 15, "nom": 0}.get(c["niveau"], 0)
-        c["score"] = (100 * c["blanc"] + 45 * resolution + confiance + 25 * min(1.0, (len(c["sites"]) - 1) / 2)
-                      + (20 if c["principale"] else 0)  # photo principale d'une page, plutôt qu'une photo de galerie
-                      - (60 if c["niveau"] == "nom" else 0))
-
     for c in uniques:
-        noter(c)
+        _noter(c)
     uniques.sort(key=lambda c: -c["score"])
     # les meilleures photos encore modestes (moins de 1 500 px réels) : on cherche leur version d'origine, en grand
-    a_agrandir = [c for c in uniques[:8] if c["nette"] < 1500]
+    a_agrandir = [c for c in uniques[:8] if c["nette"] < 1500 and c["_sources"]]
     if a_agrandir:
         ex = ThreadPoolExecutor(max_workers=8)
         futures = {ex.submit(_agrandir_candidat, c): c for c in a_agrandir}
@@ -1220,15 +1410,17 @@ def _candidats_de_pages(pages, maxi=30):
                 nouveau = None
             if nouveau:
                 futures[f].update(nouveau)
-                noter(futures[f])
-    uniques = [c for c in uniques if max(c["largeur"], c["hauteur"]) >= MIN_COTE_VERIFIE]
+                _noter(futures[f])
+    uniques = [c for c in uniques if max(c["largeur"], c["hauteur"]) >= MIN_COTE_VERIFIE or c["niveau"] == "base"]
     for c in uniques:
-        c["verifie"] = c["niveau"] != "nom"
+        c["verifie"] = c["niveau"] in NIVEAUX_VERIFIES
         c["nb_sites"] = len(c["sites"])
         c["sites"] = sorted(c["sites"])
         c.pop("_h", None)
+        c.pop("_c", None)
         c.pop("_sources", None)
-    uniques.sort(key=lambda c: -c["score"])
+    # belles photos d'abord ; les photos trop médiocres (floues, sans fond blanc, encombrées) ne viennent qu'après
+    uniques.sort(key=lambda c: (c["beaute"] < BEAUTE_MINI, -c["score"]))
     return uniques
 
 
@@ -1273,11 +1465,17 @@ def _nom_pour_requete(nom: str, marque: str = "") -> str:
     return texte
 
 
-def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int = 12, progression=None):
-    """Recherche web du visuel (voir _rechercher_visuels). En cas d'incident imprévu, une recherche d'images plus
-    simple (filtrée : titre citant le code ou le nom) prend le relais : l'écran n'est jamais bloqué."""
+def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int = 12, progression=None,
+                       image_base=None):
+    """Recherche unique du visuel, sur tous les canaux à la fois (voir _rechercher_visuels). Retourne un dict :
+      photos   : les photos retenues, la plus belle d'abord (les NOMBRE_PROPOSEES premières sont montrées d'office) ;
+      verifies / autres : les mêmes, selon que le code du produit est confirmé ou non ;
+      nom, marque : relevés sur les sites (produit inconnu du catalogue) ; journal : lignes lisibles.
+    image_base : photo des bases Open Facts (voir candidat_base), mise en concurrence avec celles du web.
+    En cas d'incident imprévu, une recherche d'images plus simple (filtrée : titre citant le code ou le nom) prend
+    le relais : l'écran n'est jamais bloqué."""
     try:
-        return _rechercher_visuels(code, nom, requetes_extra, nombre, progression)
+        return _rechercher_visuels(code, nom, requetes_extra, nombre, progression, image_base)
     except Exception as e:
         code = nettoyer_code(code)
         try:
@@ -1285,8 +1483,13 @@ def rechercher_visuels(code: str, nom: str = "", requetes_extra=(), nombre: int 
                                            code=code)
         except Exception:
             autres, msg = [], ""
-        return {"verifies": [], "autres": autres, "nom": "", "marque": "",
-                "journal": [f"Recherche vérifiée interrompue ({_detail_erreur(e)}) : images web filtrées seulement."]
+        base = []
+        if image_base:
+            base = [{k: v for k, v in image_base.items() if not k.startswith("_")}]
+            base[0].update({"verifie": True, "nb_sites": 1, "sites": sorted(image_base["sites"]),
+                            "beaute": beaute(image_base), "score": 0})
+        return {"photos": base + autres, "verifies": base, "autres": autres, "nom": "", "marque": "",
+                "journal": [f"Recherche interrompue ({_detail_erreur(e)}) : images web filtrées seulement."]
                 + ([msg] if msg else [])}
 
 
@@ -1301,18 +1504,21 @@ def _incidents(erreurs) -> str:
     return " · incidents : " + " | ".join(f"{n} × {c}" if n > 1 else c for c, n in groupes.most_common(3))
 
 
-def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=None):
+def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=None, image_base=None):
     """Cascade :
       1. moteurs de recherche (pages et images) interrogés avec le code, sous plusieurs formulations ;
          chaque page trouvée (y compris la page d'origine de chaque image) est ouverte et ne compte que si
          le code y figure ;
       2. si moins de 4 pages confirmées : recherche élargie par le nom (connu, saisi, ou relevé sur une page
          confirmée ou dans les titres des résultats), les pages trouvées étant toujours vérifiées par le code ;
-      3. à défaut de code retrouvé : pages au nom correspondant (« probables »), puis images web dont le titre cite
-         le code ou correspond au nom (code non vérifié) ; les images sans rapport avec le produit sont écartées."""
+      3. toutes les photos trouvées sont réunies : celles des pages examinées, celles des moteurs d'images (DuckDuckGo
+         et Bing Images) dont le titre ou l'adresse cite le code ou reprend le nom, et celle des bases Open Facts.
+         Chacune est téléchargée et jugée (fond blanc, netteté réelle, produit seul) ; une même photo trouvée sur
+         plusieurs sites n'est gardée qu'une fois, dans sa version la plus nette ; les images sans rapport avec le
+         produit sont écartées. Classement : beauté de la photo, puis confiance dans l'identité du produit."""
     debut = time.time()
     code = nettoyer_code(code)
-    sortie = {"verifies": [], "autres": [], "nom": "", "marque": "", "journal": []}
+    sortie = {"photos": [], "verifies": [], "autres": [], "nom": "", "marque": "", "journal": []}
     j = sortie["journal"]
 
     def etape(texte):
@@ -1415,22 +1621,33 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
             if nom_trouve2:
                 nom_trouve, marque_trouvee = nom_trouve2, marque2
 
-    # --- 3. photos, nom, et à défaut images dont le titre est cohérent
-    etape("Téléchargement des photos…")
-    candidats = _candidats_de_pages(pages)
-    confirmes = [c for c in candidats if c["niveau"] != "nom"]
-    probables = [c for c in candidats if c["niveau"] == "nom"]
-    sortie["verifies"] = (confirmes or probables)[:nombre]  # les « probables » ne servent qu'à défaut
+    # --- 3. photos de toutes les sources réunies (pages examinées, moteurs d'images, bases), jugées et classées
+    etape("Téléchargement et comparaison des photos…")
+    urls_pages = {u for p in pages for u in p["images"][:4]}
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_pages = ex.submit(_candidats_de_pages, pages)
+        f_web = ex.submit(_candidats_web, tous_bruts, code, nom_rebond, urls_pages)
+        de_pages, du_web = f_pages.result(), f_web.result()
+    tous = de_pages + du_web + ([image_base] if image_base else [])
+    photos = _classer(tous)
+    sortie["photos"] = photos[:nombre]
+    sortie["verifies"] = [c for c in sortie["photos"] if c["verifie"]]
+    sortie["autres"] = [c for c in sortie["photos"] if not c["verifie"]]
     sortie["nom"], sortie["marque"] = _nom_consensus(pages)
     if not sortie["nom"]:
         sortie["nom"], sortie["marque"] = nom_trouve, marque_trouvee
-    if not confirmes and tous_bruts:
-        etape("Tri des images du web…")
-        sortie["autres"], msg = propositions_web([], nom=nom_rebond, nombre=nombre, bruts=tous_bruts, code=code)
-        n_indice = sum(1 for c in sortie["autres"] if c["niveau"] == "indice")
-        j.append(f"Images du web : {n_indice} citant le code, {len(sortie['autres']) - n_indice} au titre cohérent avec "
-                 f"le nom" + (f" ({msg})" if msg else "") + ".")
-    j.append(f"Résultat : {len(confirmes)} photo(s) confirmée(s) par le code, {len(probables)} probable(s)"
-             + (" (non retenues, des photos confirmées existent)" if confirmes and probables else "")
-             + f", {compte['pages']} pages examinées, {time.time() - debut:.0f} s.")
+    n_conf = sum(1 for c in photos if c["verifie"])
+    n_belles = sum(1 for c in photos if c["beaute"] >= BEAUTE_MINI)
+    j.append(f"Photos évaluées : {len(de_pages)} des pages, {len(du_web)} des moteurs d'images"
+             + (", 1 des bases produits" if image_base else "") + f" ; {len(photos)} photos différentes après "
+             f"retrait des doublons, dont {n_conf} confirmées par le code et {n_belles} jugées belles "
+             "(fond blanc, nette, produit seul).")
+    if photos:
+        m = photos[0]
+        j.append(f"Meilleure photo : {m['site']} · note {m['beaute']}/100 (fond blanc {m['blanc']:.0%}, détails "
+                 f"≈ {m['nette']} px, {m['objets']} objet(s)" + (f", {m['pastilles']} pastille(s)" if m.get("pastilles")
+                                                                  else "") + f") · confiance « {m['niveau']} ».")
+    else:
+        j.append("Aucune photo utilisable n'a été trouvée.")
+    j.append(f"Durée : {time.time() - debut:.0f} s, {compte['pages']} pages examinées.")
     return sortie
