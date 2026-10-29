@@ -9,6 +9,7 @@ Le mode est activé par la liste des pharmacies, écrite par l'administrateur da
     mot_de_passe = "pbkdf2$..."      # empreinte produite par l'onglet « Ma pharmacie » (jamais le mot de passe lui-même)
     donnees = "racine"               # facultatif : reprend les données déjà enregistrées avant ce mode (une seule pharmacie)
     admin = true                     # facultatif : peut ajouter des pharmacies
+    jeton_seul = true                # facultatif : accès uniquement depuis le planning (jeton signé), mot de passe refusé
 
     [pharmacies.exemple]
     nom = "Pharmacie Exemple"
@@ -18,6 +19,12 @@ Attention : dans le fichier des secrets, ces blocs [pharmacies.…] doivent veni
 (AFFICHES_MOT_DE_PASSE, HF_TOKEN…), sinon ceux-ci seraient rangés dans le dernier bloc.
 
 Sans liste de pharmacies, l'outil fonctionne comme avant (une seule pharmacie, mot de passe commun facultatif).
+
+Accès depuis le planning d'officine (voir jeton_planning.py) : dès que le secret PLANNING_CLE_JETONS est défini, l'outil passe
+en mode « plusieurs pharmacies » et accepte les jetons signés du planning. La pharmacie désignée par le jeton n'a pas besoin
+d'être déclarée dans les secrets ni d'avoir un mot de passe : son espace « pharmacies/<identifiant>/ » est créé à sa première
+venue. L'identifiant « racine » désigne les données d'origine de l'outil (pharmacie Bouton). Une pharmacie déclarée dans les
+secrets garde ses réglages (données « racine », administrateur).
 Les données d'une pharmacie sont rangées dans <DONNEES>/pharmacies/<identifiant>/ et, pour la sauvegarde en ligne,
 sous « pharmacies/<identifiant>/ » dans le dépôt privé : une pharmacie ne lit jamais celles d'une autre.
 """
@@ -34,6 +41,7 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
+import jeton_planning
 from chemins import CODE, DONNEES
 
 ITERATIONS = 200_000
@@ -43,6 +51,7 @@ NOM_DEFAUT = "Pharmacie Bouton"
 LOGO_DEFAUT = CODE / "logo.png"
 FICHIER_LOGO = "logo_pharmacie.png"
 FICHIER_PREFERENCES = "preferences.json"  # écrit par preferences.py
+IDENT_RACINE = "racine"  # identifiant envoyé par le planning pour les données d'origine de l'outil
 COTE_MAX_LOGO = 800       # pixels
 TAILLE_MAX_LOGO = 5_000_000  # octets
 ESSAIS_MAX, FENETRE_ESSAIS = 8, 600.0  # 8 échecs en 10 minutes : connexion bloquée un moment pour cet identifiant
@@ -112,7 +121,7 @@ def _brut(env: str):
 
 
 def configuration() -> dict:
-    """{identifiant: {"nom", "mot_de_passe", "racine", "admin"}} des pharmacies valides."""
+    """{identifiant: {"nom", "mot_de_passe", "racine", "admin", "jeton_seul"}} des pharmacies valides."""
     env = os.environ.get("AFFICHES_PHARMACIES", "").strip()
     cle = ("env", env) if env else ("secrets", None)
     if _config_cache["cle"] == cle:  # les secrets ne changent pas tant que l'application tourne (redémarrage à chaque modification)
@@ -126,19 +135,20 @@ def configuration() -> dict:
             empreinte = str(fiche.get("mot_de_passe") or "")
             racine = str(fiche.get("donnees") or "") == "racine"
             admin = bool(fiche.get("admin"))
+            jeton_seul = bool(fiche.get("jeton_seul"))
         except AttributeError:
             continue
         if not ID_VALIDE.match(ident) or not nom or not empreinte.startswith("pbkdf2$"):
             continue  # fiche incomplète ou identifiant non conforme : ignorée
         racine, racine_prise = racine and not racine_prise, racine_prise or racine  # une seule pharmacie « racine »
-        res[ident] = {"nom": nom, "mot_de_passe": empreinte, "racine": racine, "admin": admin}
+        res[ident] = {"nom": nom, "mot_de_passe": empreinte, "racine": racine, "admin": admin, "jeton_seul": jeton_seul}
     _config_cache.update(cle=cle, valeur=res)
     return res
 
 
 def multi() -> bool:
-    """Vrai si une liste de pharmacies est définie (sinon : fonctionnement d'origine)."""
-    return bool(configuration())
+    """Vrai si une liste de pharmacies est définie, ou si l'accès par le planning est configuré (sinon : fonctionnement d'origine)."""
+    return bool(configuration()) or jeton_planning.active()
 
 
 def _construire(ident: str, fiche: dict) -> Contexte:
@@ -175,10 +185,35 @@ def connecter(identifiant: str, mot_de_passe: str):
     if verifier(mot_de_passe or "", empreinte) and fiche:
         with _verrou:
             _essais.pop(ident, None)
+        if fiche.get("jeton_seul"):
+            return None, "Cette pharmacie ouvre l'outil depuis son planning (menu Plus → Affiches promos)."
         return _construire(ident, fiche), ""
     with _verrou:
         _essais.setdefault(ident, []).append(time.time())
     return None, "Identifiant ou mot de passe incorrect."
+
+
+def ouvrir_session_jeton(identifiant: str, nom: str) -> bool:
+    """Session ouverte par un jeton du planning déjà vérifié. Retourne False si l'identifiant n'est pas valable."""
+    ident = (identifiant or "").strip().lower()
+    if ident != IDENT_RACINE and not ID_VALIDE.match(ident):
+        return False
+    etat = _etat()
+    etat.pop("pharmacie_id", None)
+    etat["pharmacie_jeton"] = {"id": ident, "nom": (nom or "").strip()[:80]}
+    return True
+
+
+def _contexte_jeton(j: dict) -> Contexte:
+    ident = j["id"]
+    nom = j.get("nom") or (NOM_DEFAUT if ident == IDENT_RACINE else ident)
+    fiche = configuration().get(ident)
+    if fiche:  # pharmacie déclarée dans les secrets : ses réglages s'appliquent
+        return _construire(ident, fiche)
+    if ident == IDENT_RACINE:  # données d'origine de l'outil
+        DONNEES.mkdir(parents=True, exist_ok=True)
+        return Contexte(IDENT_RACINE, nom, "", DONNEES, False, False)
+    return _construire(ident, {"nom": nom, "racine": False, "admin": False})
 
 
 def _etat():
@@ -204,8 +239,13 @@ def fermer_session() -> None:
 
 def contexte() -> Contexte:
     """Pharmacie de la session en cours (ou fonctionnement d'origine s'il n'y a pas de liste de pharmacies)."""
+    jeton = _etat().get("pharmacie_jeton")
+    if jeton and not _forcee["id"]:
+        return _contexte_jeton(jeton)
     config = configuration()
     if not config:
+        if jeton_planning.active():
+            raise PermissionError("Aucune pharmacie connectée.")
         return DEFAUT
     ident = _forcee["id"] or _etat().get("pharmacie_id")
     fiche = config.get(ident) if ident else None
@@ -215,6 +255,8 @@ def contexte() -> Contexte:
 
 
 def connectee() -> bool:
+    if _etat().get("pharmacie_jeton"):
+        return True
     if not multi():
         return True
     ident = _forcee["id"] or _etat().get("pharmacie_id")
