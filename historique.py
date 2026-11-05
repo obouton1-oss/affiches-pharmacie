@@ -56,6 +56,8 @@ def identifiant(params: dict) -> str:
         cles["promo"] = params["promo"]  # un autre type de promotion = une autre affiche (les anciennes ne changent pas)
     if params.get("orientation"):
         cles["orientation"] = params["orientation"]  # paysage = une autre affiche que le portrait du même produit
+    if params.get("empreinte_visuel"):
+        cles["empreinte_visuel"] = params["empreinte_visuel"]  # sans nom ni code : c'est la photo qui distingue l'affiche
     if params.get("sans_photo"):
         cles["sans_photo"] = True  # la version sans photo d'une affiche ne remplace pas la version avec photo
     texte = json.dumps(cles, sort_keys=True, ensure_ascii=False, default=str)

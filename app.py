@@ -163,7 +163,7 @@ for cle, defaut in (("image", None), ("marque", ""), ("detail", ""), ("journal",
                     ("w_logo_marque", True), ("cle_marque_vue", None), ("logo_marque_n", 0), ("derniere_collee_marque", None),
                     ("televerse_marque_vu", None), ("logos_props", None), ("logos_lot", []),
                     ("type_suppr_attente", False), ("w_type", TYPE["id"]),
-                    ("w_nettoyer", True), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
+                    ("w_nettoyer", True), ("w_ressortir", False), ("w_rg", 0), ("w_rd", 0), ("w_rh", 0), ("w_rb", 0),
                     ("nettete_mode", "Rapide"), ("titre_page", planche.TITRE_DEFAUT), ("w_logo_page", True),
                     ("orientation_page", planche.PORTRAIT), ("logo_n", 0),
                     ("filtre_hist", ""),
@@ -538,6 +538,11 @@ def enregistrer_affiche(code, marque, detail, prix, prix_barre, debut, fin, choi
         params["logo_marque"] = logo_marque
     if ss.elements:
         params["elements"] = ss.elements  # absent sans élément ajouté : les anciennes affiches ne changent pas
+    if ss.w_ressortir and (visuel_affiche is not None or autres_visuels):
+        params["ressortir"] = True  # ombre douce autour du produit (absent sinon : les anciennes affiches ne changent pas)
+    if not (marque or "").strip() and not (detail or "").strip() and not code and visuel_affiche is not None:
+        # affiche sans nom ni code (une photo et un prix) : la photo la distingue des autres affiches au même prix
+        params["empreinte_visuel"] = hashlib.sha1(visuel_affiche.convert("RGB").resize((32, 32)).tobytes()).hexdigest()[:12]
     if visuel_affiche is None and not autres_visuels:
         params["sans_photo"] = True  # distingue l'affiche sans photo de la même affiche avec photo (historique.identifiant)
     params["type_affiche"] = TYPE["nom"]  # le type d'affiche choisi (pour s'y retrouver dans l'historique)
@@ -592,6 +597,7 @@ def rouvrir(ident):
     if ident_type:  # les réglages de l'affiche sont ceux d'un type : on se place sur ce type
         ss.type_actif = ss.w_type = ident_type
     ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = False, "Désactivée", True
+    ss.w_ressortir = bool(e.get("ressortir"))
     ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
     ss.selection_apercu = False
     retouches.oublier(ss)  # « Annuler » ne ramène pas à l'affiche d'avant
@@ -811,6 +817,7 @@ def nouvelle_affiche(garder_serie=False):
     ss.televerse_vu = None
     ss.w_rg = ss.w_rd = ss.w_rh = ss.w_rb = 0
     ss.w_nettoyer, ss.nettete_mode, ss.traitement_desactive = True, "Rapide", False
+    ss.w_ressortir = False
     # prix et promotion
     ss.w_prix, ss.w_barre_on, ss.w_barre = "", False, ""
     ss.w_promo_type = promos.STANDARD
@@ -1136,11 +1143,11 @@ def zone_autres_images(cat, nettoyer_on, mode_nettete):
 RESERVE_APERCU = 250  # hauteur (px) occupée autour de l'affiche dans la colonne d'aperçu : marges, boutons (la barre de réglages est comptée par l'aperçu)
 
 
-def _manquants(nom, resultat_promo, rappels, prix, prix_txt):
+def _manquants(nom, resultat_promo, rappels, prix, prix_txt, photo=False):
     """Ce qu'il reste à renseigner pour que l'aperçu s'affiche (en clair)."""
     manque = []
-    if not nom:
-        manque.append("la marque ou le nom du produit")
+    if not nom and not photo:
+        manque.append("une photo, la marque ou le nom du produit")
     if resultat_promo:
         manque += [re.sub(r"\s*:?\s*à renseigner\.?$", "", r).strip() for r in rappels] or ["l'offre"]
     elif prix is None:
@@ -1409,6 +1416,11 @@ with col_form:
                     nettoyer_on = st.checkbox("Nettoyage IA : supprimer le fond, ne garder que le produit", key="w_nettoyer",
                                               help="Décocher pour imprimer la photo telle quelle (par exemple si le "
                                                    "détourage abîme le produit).")
+                    st.checkbox("Faire ressortir le produit (ombre douce, pour un produit blanc ou clair)",
+                                key="w_ressortir",
+                                help="Pose une ombre légère autour et sous le produit, pour qu'un tube, un flacon ou une "
+                                     "boîte blancs se détachent du fond blanc de l'affiche. Vaut pour toutes les images "
+                                     "de l'affiche. Sans effet sur une photo qui n'est pas sur fond blanc.")
                 else:
                     nettoyer_on = bool(ss.w_nettoyer)
 
@@ -1455,9 +1467,9 @@ with col_form:
 
         # --- Textes de l'affiche
         habillage.sous_titre("Textes de l'affiche")
-        marque = st.text_input("Marque (affichée en gros, sous la photo)", value=ss.marque)
+        marque = st.text_input("Marque (facultatif ; affichée en gros, sous la photo)", value=ss.marque)
         reglages_texte("marque", "Couleur de la marque (le détail du produit la suit tant qu'il n'a pas la sienne)")
-        detail = st.text_area("Détail du produit (affiché plus petit sous la marque ; Entrée = passage à la ligne)",
+        detail = st.text_area("Détail du produit (facultatif ; affiché plus petit sous la marque ; Entrée = passage à la ligne)",
                               value=ss.detail, height=80)
         reglages_texte("detail")
         ss.marque, ss.detail = marque, detail
@@ -1722,8 +1734,8 @@ with col_apercu:
             if e not in rappels:
                 st.error(e)
         offre_prete = rendu_promo is not None if resultat_promo else prix is not None
-        if not offre_prete or not nom:
-            habillage.etat_vide(_manquants(nom, resultat_promo, rappels, prix, prix_txt))
+        if not offre_prete or not (nom or visuel is not None):  # une photo et un prix suffisent
+            habillage.etat_vide(_manquants(nom, resultat_promo, rappels, prix, prix_txt, photo=visuel is not None))
         elif not erreurs:
             if visuel is None and avec_photo:
                 st.warning("Aucun visuel : l'affiche sera générée sans image.")
@@ -1731,7 +1743,8 @@ with col_apercu:
             ss.visuels_finaux = [visuel] + list(autres_visuels)  # pour dupliquer une image depuis la barre de l'aperçu
             unitaire, cadres = rendu(taille, marque, detail, prix, prix_barre, dates_txt, [visuel] + autres_visuels, logo,
                                      reglages=ss.reglages, majuscules=majuscules, style=ss.style, promo=rendu_promo,
-                                     identite=IDENTITE, logo_marque=logo_marque_img, elements=ss.elements)
+                                     identite=IDENTITE, logo_marque=logo_marque_img, elements=ss.elements,
+                                     ressortir=bool(ss.w_ressortir) and avec_photo)
             largeur_px = 900
             png = apercu_png(unitaire, dpi=int(round(largeur_px * 72 / taille[0])))
             noms_editeur = {**ELEMENTS, **{f"libre_{e['id']}": html.escape(libres.nom(e)) for e in ss.elements}}

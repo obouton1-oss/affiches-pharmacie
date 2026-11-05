@@ -636,6 +636,16 @@ def _dessiner_visuel(c, image, x, y, w, h, transparent=False):
     """Dessine un visuel. transparent : son fond blanc devient transparent (un élément est derrière) ; sinon, comme
     toujours, en JPEG opaque."""
     buf = io.BytesIO()
+    source = image.info.get("ressortir_source")  # visuel avec ombre douce (voir ressortir.py)
+    if transparent and source is not None:  # un élément est derrière : ombre et produit sur fond transparent
+        try:
+            import ressortir as mod_ressortir
+            mod_ressortir.appliquer(source, transparent=True).save(buf, format="PNG")
+            buf.seek(0)
+            c.drawImage(ImageReader(buf), x, y, w, h, mask="auto")
+            return
+        except Exception:
+            buf, transparent = io.BytesIO(), False
     if transparent:
         try:
             _libres().visuel_transparent(image).save(buf, format="PNG")
@@ -673,7 +683,7 @@ def _dessiner_gamme(c, images, rects, reglages, W, H, derriere, cadres):
 
 def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, texte_dates="",
                    image=None, afficher_logo=True, reglages=None, majuscules=True, style=None, promo=None,
-                   identite=None, logo_marque=None, elements=None):
+                   identite=None, logo_marque=None, elements=None, ressortir=False):
     """sortie : chemin ou objet binaire. taille_page : (largeur, hauteur) en points.
     Si la marque est vide, le détail devient la ligne principale.
     image : un visuel (image PIL) ou une liste de visuels (MAX_VISUELS au maximum), placés côte à côte sur une rangée.
@@ -685,6 +695,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     produit reste écrit) ; ignoré si la marque est vide.
     elements : éléments ajoutés à la main (voir elements_libres.py) : textes, prix, formes, derrière (par défaut, avant
     tout le reste) ou devant le visuel. Leurs cadres portent la clé « libre_<identifiant> ».
+    ressortir : ombre douce autour de chaque visuel (voir ressortir.py), pour un produit blanc sur le fond blanc.
     Retourne les cadres des éléments, normalisés (x0, y0, x1, y1) depuis le coin haut-gauche."""
     W, H = taille_page
     paysage = est_paysage(taille_page)
@@ -723,6 +734,9 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     if not marque and detail:
         marque, detail = detail, ""
     images = [im for im in (image if isinstance(image, (list, tuple)) else [image]) if im is not None][:MAX_VISUELS]
+    if ressortir and images:
+        import ressortir as mod_ressortir
+        images = [mod_ressortir.appliquer(im) for im in images]
     c = canvas.Canvas(sortie, pagesize=(W, H))
     c.setTitle(f"Affiche promo - {marque} {detail}".replace("\n", " ").strip())
     m = S * 0.07

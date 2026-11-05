@@ -78,5 +78,6 @@ def pdf_depuis_entree(e: dict, visuels=(), identite=None, logo_marque=None) -> b
     pdf, _ = af.rendu(taille_entree(e), e.get("marque") or "", e.get("detail") or "", prix, prix_barre, dates,
                       list(visuels), bool(e.get("logo", True)), reglages=reglages_entree(e),
                       majuscules=bool(e.get("majuscules", True)), style=style_entree(e), promo=rendu_promo,
-                      identite=identite, logo_marque=logo_marque, elements=elements_entree(e))
+                      identite=identite, logo_marque=logo_marque, elements=elements_entree(e),
+                      ressortir=bool(e.get("ressortir")))
     return pdf

@@ -147,6 +147,9 @@ def _vignette(c, x, y, w, h, e, st):
     """Vignette d'une affiche. (x, y) : coin inférieur gauche. e : entrée de l'historique, avec « _images » (liste
     d'images PIL : le visuel principal puis les autres)."""
     images = e.get("_images") or ([e["_image"]] if e.get("_image") is not None else [])
+    if e.get("ressortir") and images:  # « Faire ressortir » : même ombre douce que sur l'affiche
+        import ressortir
+        images = [ressortir.appliquer(im) for im in images]
     reg, bold = af.polices_famille(st["police"])
     hc = af._hauteur_chiffre(bold)
     col_nom, col_sec = HexColor(st["couleur_nom"]), HexColor(st["couleur_secondaire"])
