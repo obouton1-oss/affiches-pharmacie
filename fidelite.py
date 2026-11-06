@@ -2,8 +2,9 @@
 
 Exemple : « Santé Verte : 6 produits achetés + 1 offert ». De haut en bas : logo et nom de la pharmacie, titre
 (« CARTE DE FIDÉLITÉ »), logo du laboratoire (ou son nom), gamme concernée (facultatif), offre dans le bandeau
-du prix, cases de la carte (facultatif : une case par produit acheté, puis la case « offert »), précision
-(facultatif : « Demandez votre carte en caisse »). En paysage : laboratoire à gauche, titre, offre et cases à droite.
+du prix, précision (facultatif). En paysage : laboratoire à gauche, titre et offre à droite.
+Affiche destinée au rayon ou à l'espace de vente : le suivi des achats se fait par le logiciel de la pharmacie
+(pas de carte papier ni de cases à tamponner).
 
 Les couleurs et la police sont celles du style en cours (onglet « Créer une affiche »). Le logo du laboratoire est
 rangé avec les logos de marques de la pharmacie (voir marques.py). Ce module ne dépend pas de Streamlit.
@@ -22,8 +23,7 @@ import planche
 TITRE_DEFAUT = "Carte de fidélité"
 ACHETES_DEFAUT, OFFERTS_DEFAUT = 6, 1
 MAX_ACHETES, MAX_OFFERTS = 30, 5
-MAX_CASES = 16  # au-delà, les cases de la carte ne sont pas dessinées (trop petites)
-PRECISION_EXEMPLE = "Demandez votre carte en caisse"
+PRECISION_EXEMPLE = "Avantage enregistré en caisse sur votre compte fidélité"  # exemple affiché dans le champ vide
 
 
 def textes_offre(achetes, offerts):
@@ -122,45 +122,6 @@ def _offre(c, haut, bas, x, y, w, h, st, bold, hc):
         af._dessiner_texte(c, haut, cx, base, t * ratio, bold, couleur, hc)
 
 
-def _cases(c, achetes, offerts, x, y, w, h, st, bold):
-    """Cases de la carte : une case vide par produit acheté (à tamponner), puis les cases « offert »."""
-    n = achetes + offerts
-    rangees = 1 if n <= 8 else 2
-    par_rangee = -(-n // rangees)
-    d = min(w / (par_rangee * 1.25), h / (rangees * 1.25))
-    r = d / 2
-    pas = d * 1.25
-    fond = bool(st.get("fond_prix"))
-    accent = HexColor(st["couleur_accent"])
-    remplissage = HexColor(st["couleur_fond_prix"] if fond else st["couleur_prix"])
-    texte_offert = HexColor(st["couleur_prix"]) if fond else white
-    k = 0
-    for ligne in range(rangees):
-        dans = min(par_rangee, n - ligne * par_rangee)
-        x0 = x + w / 2 - (dans - 1) * pas / 2
-        cy = y + h / 2 + (rangees - 1) * pas / 2 - ligne * pas
-        for j in range(dans):
-            cx = x0 + j * pas
-            if k < achetes:
-                c.setStrokeColor(accent)
-                c.setLineWidth(max(0.8, d * 0.06))
-                c.setFillColor(white)
-                c.circle(cx, cy, r, stroke=1, fill=1)
-                corps = d * 0.34
-                c.setFillColor(accent)
-                c.setFont(bold, corps)
-                c.drawCentredString(cx, cy - corps * 0.36, str(k + 1))
-            else:
-                c.setFillColor(remplissage)
-                c.circle(cx, cy, r * 1.04, stroke=0, fill=1)
-                mot = "OFFERT"
-                corps = min(d * 0.30, d * 0.82 / max(0.1, stringWidth(mot, bold, 1.0)))
-                c.setFillColor(texte_offert)
-                c.setFont(bold, corps)
-                c.drawCentredString(cx, cy - corps * 0.36, mot)
-            k += 1
-
-
 def _empiler(blocs, x, y, w, h, ecart):
     """Répartit la hauteur (x, y, w, h) entre les blocs [(poids, fonction(x, y, w, h)), ...], de haut en bas."""
     blocs = [b for b in blocs if b]
@@ -177,7 +138,7 @@ def _empiler(blocs, x, y, w, h, ecart):
 
 def construire(sortie, taille_page, labo="", logo_labo=None, haut="", bas="", achetes=ACHETES_DEFAUT,
                offerts=OFFERTS_DEFAUT, titre=TITRE_DEFAUT, gamme="", precision="", style=None, identite=None,
-               logo_pharmacie=True, cases=True, majuscules=True):
+               logo_pharmacie=True, majuscules=True):
     """Dessine l'affiche dans `sortie` (chemin ou objet binaire). taille_page : (largeur, hauteur) en points.
     haut / bas : petit texte et texte principal de l'offre (voir textes_offre). identite : voir pharmacie.identite."""
     W, H = taille_page
@@ -204,10 +165,8 @@ def construire(sortie, taille_page, labo="", logo_labo=None, haut="", bas="", ac
         c.line(W / 2 - S * 0.18, y_filet, W / 2 + S * 0.18, y_filet)
         y1 = y_filet - S * 0.035
 
-    n_cases = achetes + offerts
-    montrer_cases = cases and n_cases <= MAX_CASES
     b_titre = (0.10, lambda x, y, w, h: _titre(c, titre, x, y, w, h, st, bold)) if titre else None
-    b_labo = (0.34, lambda x, y, w, h: _labo(c, labo, logo_labo, x, y, w, h, st, bold, majuscules)) \
+    b_labo = (0.38, lambda x, y, w, h: _labo(c, labo, logo_labo, x, y, w, h, st, bold, majuscules)) \
         if (labo or logo_labo is not None) else None
     b_gamme = None
     if gamme:
@@ -215,9 +174,7 @@ def construire(sortie, taille_page, labo="", logo_labo=None, haut="", bas="", ac
             lignes, t = _texte_tient(gamme, reg, w, h, h * 0.75)
             _lignes(c, lignes, t, reg, HexColor(af.couleur_detail(st)), x + w / 2, y + h / 2)
         b_gamme = (0.07, _dessin_gamme)
-    b_offre = (0.26, lambda x, y, w, h: _offre(c, haut, bas, x, y, w, h, st, bold, hc)) if (haut or bas) else None
-    b_cases = (0.13 if n_cases <= 8 else 0.20,
-               lambda x, y, w, h: _cases(c, achetes, offerts, x, y, w, h, st, bold)) if montrer_cases else None
+    b_offre = (0.30, lambda x, y, w, h: _offre(c, haut, bas, x, y, w, h, st, bold, hc)) if (haut or bas) else None
     b_prec = None
     if precision:
         def _dessin_precision(x, y, w, h):
@@ -225,14 +182,14 @@ def construire(sortie, taille_page, labo="", logo_labo=None, haut="", bas="", ac
             _lignes(c, lignes, t, reg, HexColor(st["couleur_secondaire"]), x + w / 2, y + h / 2)
         b_prec = (0.07, _dessin_precision)
 
-    if W / H >= af.SEUIL_PAYSAGE:  # paysage : laboratoire (et gamme) à gauche, titre, offre, cases à droite
+    if W / H >= af.SEUIL_PAYSAGE:  # paysage : laboratoire (et gamme) à gauche, titre et offre à droite
         part = 0.40 if (b_labo or b_gamme) else 0.0
         if part:
             _empiler([b_labo, b_gamme], x0, y0, (x1 - x0) * part - ecart, y1 - y0, ecart)
         xd = x0 + (x1 - x0) * part
-        _empiler([b_titre, b_offre, b_cases, b_prec], xd, y0, x1 - xd, y1 - y0, ecart)
+        _empiler([b_titre, b_offre, b_prec], xd, y0, x1 - xd, y1 - y0, ecart)
     else:
-        _empiler([b_titre, b_labo, b_gamme, b_offre, b_cases, b_prec], x0, y0, x1 - x0, y1 - y0, ecart)
+        _empiler([b_titre, b_labo, b_gamme, b_offre, b_prec], x0, y0, x1 - x0, y1 - y0, ecart)
     c.showPage()
     c.save()
 

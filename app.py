@@ -2131,8 +2131,8 @@ with onglet_page:
 # ----------------------------------------------------------------------------
 for cle, defaut in (("w_fid_labo", ""), ("w_fid_achetes", fidelite.ACHETES_DEFAUT),
                     ("w_fid_offerts", fidelite.OFFERTS_DEFAUT), ("w_fid_libre", False), ("w_fid_haut", ""),
-                    ("w_fid_bas", ""), ("w_fid_gamme", ""), ("w_fid_precision", fidelite.PRECISION_EXEMPLE),
-                    ("w_fid_titre", fidelite.TITRE_DEFAUT), ("w_fid_cases", True), ("w_fid_logo_labo", True),
+                    ("w_fid_bas", ""), ("w_fid_gamme", ""), ("w_fid_precision", ""),
+                    ("w_fid_titre", fidelite.TITRE_DEFAUT), ("w_fid_logo_labo", True),
                     ("w_fid_logo_pharmacie", True), ("w_fid_majuscules", True), ("w_fid_format", "A5"),
                     ("w_fid_paysage", False), ("w_fid_exemplaires", 1), ("w_fid_planche", True),
                     ("fid_logos", None), ("fid_import_n", 0), ("fid_msg", "")):
@@ -2162,8 +2162,8 @@ def fid_chercher_logo(labo):
 with onglet_fidelite:
     col_g, col_d = st.columns([3, 2], gap="large")
     with col_g:
-        st.caption("Affiche ou affichette pour la carte de fidélité d'un laboratoire : logo de la pharmacie, logo du "
-                   "laboratoire et l'offre en dessous. Polices et couleurs : celles choisies dans l'onglet "
+        st.caption("Affiche ou affichette pour le rayon ou l'espace de vente, présentant l'offre fidélité d'un "
+                   "laboratoire : logo de la pharmacie, logo du laboratoire et l'offre en dessous. Polices et couleurs : celles choisies dans l'onglet "
                    f"« {ONGLET_CREER} ».")
         with st.container(key="etape_fid_labo"):
             habillage.titre_etape(1, "Laboratoire", fait=bool(ss.w_fid_labo.strip()))
@@ -2225,10 +2225,6 @@ with onglet_fidelite:
             f1, f2 = st.columns(2, vertical_alignment="bottom")
             f1.radio("Format", list(FORMATS), horizontal=True, key="w_fid_format")
             f2.checkbox("En paysage (à l'horizontale)", key="w_fid_paysage")
-            n_cases = ss.w_fid_achetes + ss.w_fid_offerts
-            st.checkbox("Dessiner les cases de la carte (une par produit acheté, puis « offert »)", key="w_fid_cases",
-                        disabled=n_cases > fidelite.MAX_CASES,
-                        help=f"{fidelite.MAX_CASES} cases au plus." if n_cases > fidelite.MAX_CASES else None)
             c1, c2 = st.columns(2)
             c1.checkbox("Logo de la pharmacie", key="w_fid_logo_pharmacie")
             c2.checkbox("Nom du laboratoire en majuscules", key="w_fid_majuscules",
@@ -2252,7 +2248,7 @@ with onglet_fidelite:
                 taille, labo=labo, logo_labo=logo_labo if ss.w_fid_logo_labo else None, haut=haut, bas=bas,
                 achetes=int(ss.w_fid_achetes), offerts=int(ss.w_fid_offerts), titre=ss.w_fid_titre,
                 gamme=ss.w_fid_gamme, precision=ss.w_fid_precision, style=ss.style, identite=IDENTITE,
-                logo_pharmacie=bool(ss.w_fid_logo_pharmacie), cases=bool(ss.w_fid_cases),
+                logo_pharmacie=bool(ss.w_fid_logo_pharmacie),
                 majuscules=bool(ss.w_fid_majuscules))
             st.image(apercu_png(pdf_fid, 90), use_container_width=True)
             planche_fid = bool(ss.get("w_fid_planche", True)) and par_feuille > 1
