@@ -883,6 +883,10 @@ def confirmer_suppression(ident):
 
 
 
+MSG_MOTEURS_MUETS = ("La recherche de photo n'a pas pu se faire : les moteurs de recherche n'ont pas répondu au "
+                     "serveur de l'application (accès refusé ou trop de recherches en peu de temps). Le produit n'est "
+                     "pas en cause. Réessayer dans une à deux minutes avec « Chercher à nouveau » ci-dessous, ou "
+                     "coller une image copiée.")
 MSG_AUCUNE_IMAGE = ("Aucune photo fiable n'a été trouvée automatiquement : rien de lié à ce produit (ni le code ni le "
                     "nom). Ajouter un mot précis (la gamme, par exemple) dans « Aucune photo ne convient ? » "
                     "ci-dessous, ou coller une image copiée.")
@@ -909,7 +913,7 @@ def chercher_web(extra=(), auto=True):
     ss.info_nom = ""
     ss.props_choisie, ss.props_ouvertes, ss.props_tout = None, True, False
     ss.props, ss.props_autres = res["photos"], []
-    ss.props_msg = "" if ss.props else MSG_AUCUNE_IMAGE
+    ss.props_msg = "" if ss.props else (MSG_MOTEURS_MUETS if res.get("moteurs_muets") else MSG_AUCUNE_IMAGE)
     if res["nom"] and not ss.marque and not ss.detail:  # produit inconnu du catalogue : nom relevé sur les sites
         ss.marque, ss.detail = catalogue.separer(res["nom"], res["marque"])
         ss.info_nom = catalogue.nom_complet(ss.marque, ss.detail)
@@ -1366,7 +1370,8 @@ with col_form:
                                    url=f"https://www.google.com/search?tbm=isch&q={quote(code_net)}",
                                    icon=":material/open_in_new:")
             if ss.journal or ss.journal_web:
-                with st.expander("Détail de la recherche", icon=":material/list_alt:"):
+                with st.expander("Détail de la recherche", icon=":material/list_alt:",
+                                 expanded=bool(code_net) and not ss.props and ss.image is None):
                     for ligne in list(ss.journal) + list(ss.journal_web):
                         st.write("• " + ligne)
 

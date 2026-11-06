@@ -632,22 +632,32 @@ def _detail_erreur(e: Exception) -> str:
     return type(e).__name__ + (f" ({texte[:90]})" if texte else "")
 
 
+# Moteurs de pages interrogés par ddgs. Le réglage « auto » de ddgs commence toujours par Wikipédia et Grokipedia
+# (inutiles pour un code-barres) et tire les autres au hasard : on les désigne donc nous-mêmes. Startpage donne les
+# résultats de Google, très bons pour les codes-barres ; Brave a son propre index ; DuckDuckGo et Yahoo, ceux de Bing.
+MOTEURS_TEXTE = "startpage,brave,duckduckgo,yahoo"
+
+
 def _ddgs(methode, requete, **options):
     """Une recherche (« text » ou « images ») par les moteurs du module ddgs ; un 2e essai en cas d'échec."""
     from ddgs import DDGS
+    if methode == "text":
+        options.setdefault("backend", MOTEURS_TEXTE)
     erreur = None
     for essai in range(2):
         try:
-            return getattr(DDGS(), methode)(requete, **options) or []
+            return getattr(DDGS(timeout=8), methode)(requete, **options) or []
         except Exception as e:
             erreur = e
+            if "No results" in str(e):
+                break  # réponse vide : inutile d'insister
             time.sleep(0.6 + essai)
     raise erreur
 
 
 def _texte_bing(requete):
-    """Recherche de pages par Bing, directement (moteur fourni avec ddgs mais désactivé par défaut) : repli quand
-    les moteurs de texte de ddgs échouent tous (adresses de l'hébergeur bloquées, par exemple)."""
+    """Recherche de pages par Bing, directement (moteur fourni avec ddgs mais désactivé par défaut). Bing répond
+    très bien aux codes-barres : il est interrogé pour chaque recherche, en plus des moteurs de ddgs."""
     from ddgs.engines.bing import Bing
     res = Bing(timeout=8).search(requete, region="fr-fr")
     if not res:
@@ -666,63 +676,76 @@ def _images_bing(requete):
              "height": r.height, "moteur": "bing"} for r in res]
 
 
-def _recherches(methode, requetes, **options):
-    """Plusieurs recherches, 3 à la fois. Retourne (liste de résultats par requête, incidents lisibles).
-    Recherche de pages (« text ») : si les moteurs de ddgs échouent, Bing est interrogé directement ; dès qu'ils
-    échouent pour une autre raison qu'une absence de résultat, ils ne sont plus sollicités pour les requêtes suivantes.
-    Recherche d'images : deux moteurs à chaque fois, celui de ddgs (DuckDuckGo) et Bing Images ; leurs résultats
-    sont réunis (les doublons sont retirés ensuite)."""
+def _recherches(methode, requetes, bilan=None, **options):
+    """Plusieurs recherches, 3 à la fois. Chaque recherche interroge deux sources en parallèle et réunit leurs
+    résultats : pour les pages, les moteurs de ddgs (Startpage, Brave, DuckDuckGo, Yahoo) et Bing directement ;
+    pour les images, DuckDuckGo (par ddgs) et Bing Images directement. Ainsi, une source refusée par l'hébergeur
+    (adresses bloquées, limite de requêtes) ne fait pas échouer la recherche.
+    Retourne (liste de résultats par requête, incidents lisibles).
+    bilan : dict facultatif, complété pour le journal : nombre de résultats et d'échecs de chaque source."""
     try:
         importlib.import_module("ddgs")
     except Exception:
         return [], ["module de recherche web non installé (ddgs)"]
     erreurs = []
-    etat = {"ddgs_ko": False, "bing": 0, "bing_images": 0}
+    bilan = bilan if bilan is not None else {}
+    nom_ddgs, nom_bing = ("moteurs ddgs", "Bing") if methode == "text" else ("DuckDuckGo Images", "Bing Images")
+    for nom_source in (nom_ddgs, nom_bing):
+        bilan.setdefault(nom_source, {"resultats": 0, "echecs": 0, "recherches": 0})
+
+    def source(nom_source, fonction, req):
+        bilan[nom_source]["recherches"] += 1
+        try:
+            res = fonction(req)
+            bilan[nom_source]["resultats"] += len(res)
+            return res, ""
+        except Exception as e:
+            bilan[nom_source]["echecs"] += 1
+            return [], f"{nom_source} {_detail_erreur(e)}"
 
     def une(req):
-        cause = ""
-        if methode == "images":
-            res = []
-            try:
-                res += _ddgs(methode, req, **options)
-            except Exception as e:
-                cause = "ddgs " + _detail_erreur(e)
-            try:
-                trouves = _images_bing(req)
-                etat["bing_images"] += len(trouves)
-                res += trouves
-            except Exception as e:
-                cause = (cause + " ; " if cause else "") + "Bing Images " + _detail_erreur(e)
-            if cause and not res:
-                erreurs.append(f"« {req[:30]} » — {cause}")
-            return res
-        if not (methode == "text" and etat["ddgs_ko"]):
-            try:
-                return _ddgs(methode, req, **options)
-            except Exception as e:
-                cause = "ddgs " + _detail_erreur(e)
-                if methode == "text" and "No results" not in str(e):
-                    etat["ddgs_ko"] = True
         if methode == "text":
-            try:
-                res = _texte_bing(req)
-                etat["bing"] += 1
-                return res
-            except Exception as e:
-                cause = (cause + " ; " if cause else "") + "Bing " + _detail_erreur(e)
-        erreurs.append(f"« {req[:30]} » — {cause}")
-        return []
+            f_ddgs, f_bing = (lambda r: _ddgs("text", r, **options)), _texte_bing
+        else:
+            f_ddgs, f_bing = (lambda r: _ddgs("images", r, **options)), _images_bing
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            a_ = ex.submit(source, nom_ddgs, f_ddgs, req)
+            b_ = ex.submit(source, nom_bing, f_bing, req)
+            (res_a, err_a), (res_b, err_b) = a_.result(), b_.result()
+        res = res_a + res_b
+        if not res:
+            erreurs.append(f"« {req[:30]} » — " + " ; ".join(x for x in (err_a, err_b) if x))
+        return res
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         lots = list(ex.map(une, list(dict.fromkeys(r for r in requetes if r.strip()))))
-    if etat["bing"]:
-        erreurs.append(f"moteurs ddgs indisponibles, {etat['bing']} recherche(s) de pages faite(s) par Bing")
     return lots, erreurs
 
 
-def images_web(requetes):
+def resume_moteurs(bilan) -> str:
+    """Bilan des sources de recherche, pour le journal (« Bing : 54 résultats ; moteurs ddgs : refusé 5 fois »)."""
+    morceaux = []
+    for nom_source, b in bilan.items():
+        if not b["recherches"]:
+            continue
+        if b["resultats"]:
+            morceaux.append(f"{nom_source} {b['resultats']} résultats"
+                            + (f" ({b['echecs']} échec(s) sur {b['recherches']})" if b["echecs"] else ""))
+        else:
+            morceaux.append(f"{nom_source} aucun résultat ({b['echecs']} échec(s) sur {b['recherches']})")
+    return " · ".join(morceaux)
+
+
+def moteurs_muets(bilan) -> bool:
+    """Vrai si aucune source de recherche n'a rien renvoyé et qu'il y a eu des échecs : la recherche n'a pas pu
+    se faire (accès refusé à l'hébergeur, limite de requêtes), ce qui ne veut pas dire que le produit est absent."""
+    faites = [b for b in bilan.values() if b["recherches"]]
+    return bool(faites) and all(b["resultats"] == 0 for b in faites) and any(b["echecs"] for b in faites)
+
+
+def images_web(requetes, bilan=None):
     """Résultats bruts d'une recherche d'images (sans doublon). Retourne (résultats, erreurs)."""
-    lots, erreurs = _recherches("images", requetes, region="fr-fr", max_results=25)
+    lots, erreurs = _recherches("images", requetes, bilan=bilan, region="fr-fr", max_results=25)
     vus, bruts = set(), []
     for lot in lots:
         for r in lot:
@@ -1100,11 +1123,11 @@ def _url_examinable(u: str) -> bool:
     return not re.search(r"\.(pdf|jpe?g|png|webp|gif)$", p.path, re.I)
 
 
-def _urls_de_recherche(requetes, code):
+def _urls_de_recherche(requetes, code, bilan=None):
     """Pages trouvées par les moteurs de recherche (texte), sans doublon.
     Retourne (adresses dont le résultat cite déjà le code, autres adresses, incidents lisibles,
     titres des résultats qui citent le code : le nom du produit s'y lit même si la page ne s'ouvre pas)."""
-    lots, erreurs = _recherches("text", requetes, region="fr-fr", max_results=15)
+    lots, erreurs = _recherches("text", requetes, bilan=bilan, region="fr-fr", max_results=15)
     motif = _motif_code(code)
     vus, avec, sans, titres = set(), [], [], []
     for lot in lots:
@@ -1518,8 +1541,10 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
          produit sont écartées. Classement : beauté de la photo, puis confiance dans l'identité du produit."""
     debut = time.time()
     code = nettoyer_code(code)
-    sortie = {"photos": [], "verifies": [], "autres": [], "nom": "", "marque": "", "journal": []}
+    sortie = {"photos": [], "verifies": [], "autres": [], "nom": "", "marque": "", "journal": [],
+              "moteurs_muets": False}
     j = sortie["journal"]
+    bilan_moteurs = {}
 
     def etape(texte):
         if progression:
@@ -1558,8 +1583,8 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
     def chercher(req_texte, req_images, titre):
         etape(f"{titre} : interrogation des moteurs de recherche…")
         with ThreadPoolExecutor(max_workers=2) as ex:
-            f_texte = ex.submit(_urls_de_recherche, req_texte, code)
-            f_images = ex.submit(images_web, req_images)
+            f_texte = ex.submit(_urls_de_recherche, req_texte, code, bilan_moteurs)
+            f_images = ex.submit(images_web, req_images, bilan_moteurs)
             avec, sans, err_t, titres = f_texte.result()
             bruts, err_i = f_images.result()
         tous_bruts.extend(bruts)
@@ -1620,6 +1645,12 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
             nom_trouve2, marque2 = _nom_consensus(pages)
             if nom_trouve2:
                 nom_trouve, marque_trouvee = nom_trouve2, marque2
+
+    j.append("Moteurs de recherche : " + (resume_moteurs(bilan_moteurs) or "aucun interrogé") + ".")
+    sortie["moteurs_muets"] = moteurs_muets(bilan_moteurs)
+    if sortie["moteurs_muets"]:
+        j.append("Aucun moteur de recherche n'a répondu : la recherche n'a pas pu se faire (accès refusé au serveur "
+                 "de l'application ou trop de recherches en peu de temps). Ce n'est pas que le produit est introuvable.")
 
     # --- 3. photos de toutes les sources réunies (pages examinées, moteurs d'images, bases), jugées et classées
     etape("Téléchargement et comparaison des photos…")
