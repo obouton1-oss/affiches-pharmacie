@@ -21,6 +21,7 @@ import acces
 import catalogue
 import elements_libres as libres
 import fidelite
+import historique_fidelite
 import habillage
 import historique
 import images_produits as ip
@@ -2148,17 +2149,24 @@ with onglet_page:
 
 
 # ----------------------------------------------------------------------------
-# Onglet « Cartes de fidélité » : affiche ou affichette d'un programme de fidélité d'un laboratoire
-# (« Santé Verte : 6 produits achetés + 1 offert »), avec le logo de la pharmacie et celui du laboratoire
+# Onglet « Cartes de fidélité » : affiche ou affichette de rayon présentant l'offre fidélité d'un laboratoire
+# (« Santé Verte : 6 produits achetés + 1 offert »), avec le logo de la pharmacie et celui du laboratoire.
+# Historique séparé de celui des affiches promo (voir historique_fidelite.py).
 # ----------------------------------------------------------------------------
-for cle, defaut in (("w_fid_labo", ""), ("w_fid_achetes", fidelite.ACHETES_DEFAUT),
-                    ("w_fid_offerts", fidelite.OFFERTS_DEFAUT), ("w_fid_libre", False), ("w_fid_haut", ""),
-                    ("w_fid_bas", ""), ("w_fid_gamme", ""), ("w_fid_precision", ""),
-                    ("w_fid_titre", fidelite.TITRE_DEFAUT), ("w_fid_logo_labo", True),
-                    ("w_fid_logo_pharmacie", True), ("w_fid_majuscules", True), ("w_fid_format", "A5"),
-                    ("w_fid_paysage", False), ("w_fid_exemplaires", 1), ("w_fid_planche", True),
-                    ("fid_logos", None), ("fid_import_n", 0), ("fid_msg", "")):
+FID_VUE_CREER, FID_VUE_HISTORIQUE = "Créer", "Affiches enregistrées"
+FID_DEFAUTS = {"w_fid_labo": "", "w_fid_achetes": fidelite.ACHETES_DEFAUT, "w_fid_offerts": fidelite.OFFERTS_DEFAUT,
+               "w_fid_libre": False, "w_fid_haut": "", "w_fid_bas": "", "w_fid_gamme": "", "w_fid_precision": "",
+               "w_fid_titre": fidelite.TITRE_DEFAUT, "w_fid_logo_labo": True, "w_fid_logo_pharmacie": True,
+               "w_fid_majuscules": True, "w_fid_format": "A5", "w_fid_paysage": False}
+for cle, defaut in (list(FID_DEFAUTS.items())
+                    + [("w_fid_exemplaires", 1), ("w_fid_planche", True), ("fid_vue", FID_VUE_CREER),
+                       ("fid_logos", None), ("fid_import_n", 0), ("fid_msg", ""), ("fid_style", None),
+                       ("fid_ouverte", None), ("fid_suppr_attente", None), ("fid_filtre", "")]):
     ss.setdefault(cle, defaut)
+# Streamlit oublie les champs non affichés (vue « Affiches enregistrées ») : ils sont réaffirmés à chaque passage pour que
+# le formulaire en cours soit retrouvé tel quel en revenant à « Créer » (voir _garder_les_champs)
+for cle in list(FID_DEFAUTS) + ["w_fid_exemplaires", "w_fid_planche"]:
+    ss[cle] = ss[cle]
 
 
 def fid_offre_libre():
@@ -2181,104 +2189,282 @@ def fid_chercher_logo(labo):
                     "n": ss.logo_marque_n}
 
 
+def fid_parametres() -> dict:
+    """Réglages de l'affiche en cours (noms de historique_fidelite.CHAMPS)."""
+    p = {c: ss[f"w_fid_{c}"] for c in historique_fidelite.CHAMPS}
+    p["labo"] = " ".join(str(p["labo"] or "").split())
+    p["achetes"], p["offerts"] = int(p["achetes"]), int(p["offerts"])
+    if p["libre"]:
+        p["haut"], p["bas"] = str(p["haut"] or "").strip(), str(p["bas"] or "").strip()
+    else:
+        p["haut"], p["bas"] = fidelite.textes_offre(p["achetes"], p["offerts"])
+    return p
+
+
+def fid_taille(p):
+    return orienter(FORMATS.get(p.get("format"), FORMATS["A5"]), bool(p.get("paysage")))
+
+
+def fid_pdf(p, style, logo_labo, identite) -> bytes:
+    """PDF d'une affiche fidélité (une page au format de l'affiche). Ne dépend que de ses paramètres."""
+    return fidelite.pdf(fid_taille(p), labo=p.get("labo", ""), logo_labo=logo_labo if p.get("logo_labo", True) else None,
+                        haut=p.get("haut", ""), bas=p.get("bas", ""), achetes=int(p.get("achetes") or 1),
+                        offerts=int(p.get("offerts") or 1), titre=p.get("titre", ""), gamme=p.get("gamme", ""),
+                        precision=p.get("precision", ""), style=style, identite=identite,
+                        logo_pharmacie=bool(p.get("logo_pharmacie", True)), majuscules=bool(p.get("majuscules", True)))
+
+
+def fid_nom_fichier(p) -> str:
+    return (re.sub(r"[^A-Za-z0-9_-]+", "_", f"fidelite_{p.get('labo', '')}")[:50].strip("_") or "fidelite") \
+        + f"_{p.get('format', '')}{'_paysage' if p.get('paysage') else ''}.pdf"
+
+
+def fid_enregistrer(p, style, logo_labo, apercu, message=True):
+    historique_fidelite.enregistrer(p, style, logo_labo if p.get("logo_labo", True) else None, apercu)
+    if message:
+        ss.fid_msg = f"Affiche fidélité « {p['labo']} » enregistrée (onglet « {ONGLET_FIDELITE} › {FID_VUE_HISTORIQUE} »)."
+
+
+def fid_nouvelle():
+    for cle, valeur in FID_DEFAUTS.items():
+        ss[cle] = valeur
+    ss.w_fid_exemplaires = 1
+    ss.fid_style, ss.fid_ouverte, ss.fid_logos = None, None, None
+    ss.fid_msg = "Nouvelle affiche fidélité : le formulaire est vide."
+
+
+def fid_rouvrir(ident):
+    e = historique_fidelite.charger(ident)
+    if not e:
+        ss.fid_msg = "Cette affiche n'existe plus."
+        return
+    for c in historique_fidelite.CHAMPS:
+        if e.get(c) is not None:
+            ss[f"w_fid_{c}"] = e[c]
+    if ss.w_fid_format not in FORMATS:
+        ss.w_fid_format = "A5"
+    ss.fid_style = dict(e.get("style") or {}) or None  # l'affiche garde ses couleurs et sa police
+    ss.fid_ouverte = ident  # logo enregistré avec l'affiche, si la marque n'en a plus
+    ss.fid_logos = None
+    ss.fid_vue = FID_VUE_CREER
+    ss.fid_msg = f"Affiche « {e['labo']} » rouverte : à modifier ou réimprimer."
+
+
+def fid_style_en_cours():
+    ss.fid_style = None
+
+
+def fid_demander_suppression(ident):
+    ss.fid_suppr_attente = ident
+
+
+def fid_annuler_suppression():
+    ss.fid_suppr_attente = None
+
+
+def fid_confirmer_suppression(ident):
+    historique_fidelite.supprimer(ident)
+    ss.fid_suppr_attente = None
+    if ss.fid_ouverte == ident:
+        ss.fid_ouverte = None
+    ss.fid_msg = "Affiche fidélité supprimée."
+
+
+def _fid_fabriquer(e, dossier, identite):
+    """Refait le PDF d'une affiche enregistrée au moment du téléchargement (hors de la session : paramètres seulement)."""
+    def fabriquer():
+        logo = historique_fidelite.logo(e["id"], dossier) if e.get("a_logo") else None
+        if logo is None and e.get("a_logo"):
+            logo = marques.charger(dossier, marques.trouver(dossier, e.get("labo")))
+        return fid_pdf(e, e.get("style") or style_secours, logo, identite)
+    style_secours = dict(ss.style)
+    return fabriquer
+
+
+def fid_logo_labo(labo):
+    """Logo du laboratoire : celui des logos de marques, sinon celui enregistré avec l'affiche rouverte."""
+    k = marques.trouver(CTX.dossier, labo) if labo else None
+    if k:
+        return marques.charger(CTX.dossier, k), "marques"
+    if ss.fid_ouverte:
+        e = historique_fidelite.charger(ss.fid_ouverte)
+        if e and marques.cle(e.get("labo")) == marques.cle(labo):
+            img = historique_fidelite.logo(ss.fid_ouverte)
+            if img is not None:
+                return img, "affiche"
+    return None, None
+
+
 with onglet_fidelite:
-    col_g, col_d = st.columns([3, 2], gap="large")
-    with col_g:
-        st.caption("Affiche ou affichette pour le rayon ou l'espace de vente, présentant l'offre fidélité d'un "
-                   "laboratoire : logo de la pharmacie, logo du laboratoire et l'offre en dessous. Polices et couleurs : celles choisies dans l'onglet "
-                   f"« {ONGLET_CREER} ».")
-        with st.container(key="etape_fid_labo"):
-            habillage.titre_etape(1, "Laboratoire", fait=bool(ss.w_fid_labo.strip()))
-            labo = st.text_input("Nom du laboratoire ou de la marque", key="w_fid_labo",
-                                 placeholder="Santé Verte").strip()
-            cle_logo = marques.trouver(CTX.dossier, labo) if labo else None
-            logo_labo = marques.charger(CTX.dossier, cle_logo) if cle_logo else None
-            if ss.fid_logos and (ss.fid_logos["cle"] != marques.cle(labo) or ss.fid_logos["n"] != ss.logo_marque_n):
-                ss.fid_logos = None  # propositions d'un autre laboratoire, ou logo déjà choisi
-            if ss.fid_msg:
-                st.toast(ss.fid_msg)
-                ss.fid_msg = ""
-            if labo:
-                if logo_labo is not None:
-                    a, b = st.columns([1, 3], vertical_alignment="center")
-                    a.image(ip.vers_rgb_blanc(logo_labo), use_container_width=True)
-                    b.checkbox("Imprimer le logo du laboratoire (sinon son nom en toutes lettres)",
-                               key="w_fid_logo_labo")
-                else:
-                    st.caption("Aucun logo enregistré pour ce laboratoire : son nom est écrit en toutes lettres.")
-                with st.expander("Changer de logo" if logo_labo is not None else "Ajouter le logo du laboratoire",
-                                 expanded=bool(ss.fid_logos)):
-                    st.button(f"Chercher le logo de « {labo} »", icon=":material/search:", on_click=fid_chercher_logo,
-                              args=(labo,), key="fid_chercher")
-                    if ss.fid_logos:
-                        afficher_propositions_logo(ss.fid_logos, "fid")
-                    fichier = st.file_uploader("Ou importer le logo (PNG, JPG)", type=["png", "jpg", "jpeg", "webp"],
-                                               key=f"fid_import_{ss.fid_import_n}")
-                    if fichier is not None:
-                        fid_choisir_logo(labo, fichier.getvalue())
-                        ss.fid_import_n += 1
-                        st.rerun()
-                    st.caption("Le logo est rangé avec les logos de marques : il sert aussi aux affiches promo "
-                               "de cette marque.")
+    if ss.fid_msg:
+        st.toast(ss.fid_msg)
+        ss.fid_msg = ""
+    fid_entrees = historique_fidelite.lister()
+    v1, v2 = st.columns([3, 2], vertical_alignment="center")
+    v1.radio("Affichage", (FID_VUE_CREER, FID_VUE_HISTORIQUE), horizontal=True, key="fid_vue",
+             label_visibility="collapsed",
+             format_func=lambda v: v if v == FID_VUE_CREER else f"{v} ({len(fid_entrees)})")
+    if ss.fid_vue == FID_VUE_CREER:
+        v2.button("Nouvelle affiche fidélité", icon=":material/note_add:", on_click=fid_nouvelle,
+                  use_container_width=True, help="Vider le formulaire (les affiches enregistrées sont conservées)")
 
-        with st.container(key="etape_fid_offre"):
-            habillage.titre_etape(2, "Offre", fait=True)
-            n1, n2 = st.columns(2)
-            n1.number_input("Produits à acheter", min_value=1, max_value=fidelite.MAX_ACHETES, step=1,
-                            key="w_fid_achetes")
-            n2.number_input("Produits offerts", min_value=1, max_value=fidelite.MAX_OFFERTS, step=1,
-                            key="w_fid_offerts")
-            st.checkbox("Écrire l'offre moi-même", key="w_fid_libre", on_change=fid_offre_libre,
-                        help="Pour une autre formulation : « 6 boîtes achetées », « la 7e offerte »…")
-            if ss.w_fid_libre:
-                st.text_input("Petit texte (au-dessus)", key="w_fid_haut")
-                st.text_input("Texte principal", key="w_fid_bas")
-                haut, bas = ss.w_fid_haut.strip(), ss.w_fid_bas.strip()
-            else:
-                haut, bas = fidelite.textes_offre(ss.w_fid_achetes, ss.w_fid_offerts)
-                st.caption(f"Imprimé : {haut} {bas}")
-            st.text_input("Produits concernés (facultatif)", key="w_fid_gamme",
-                          placeholder="Sur toute la gamme")
-            st.text_input("Précision (facultatif)", key="w_fid_precision", placeholder=fidelite.PRECISION_EXEMPLE)
-
-        with st.container(key="etape_fid_page"):
-            habillage.titre_etape(3, "Mise en page", fait=True)
-            st.text_input("Titre (vide : sans titre)", key="w_fid_titre", placeholder=fidelite.TITRE_DEFAUT)
-            f1, f2 = st.columns(2, vertical_alignment="bottom")
-            f1.radio("Format", list(FORMATS), horizontal=True, key="w_fid_format")
-            f2.checkbox("En paysage (à l'horizontale)", key="w_fid_paysage")
-            c1, c2 = st.columns(2)
-            c1.checkbox("Logo de la pharmacie", key="w_fid_logo_pharmacie")
-            c2.checkbox("Nom du laboratoire en majuscules", key="w_fid_majuscules",
-                        help="Quand le nom est écrit en toutes lettres (pas de logo).")
-
-        taille = orienter(FORMATS[ss.w_fid_format], ss.w_fid_paysage)
-        par_feuille = disposition_a4(taille)[0]
-        with st.container(key="etape_fid_impression"):
-            habillage.titre_etape(4, "Impression", fait=True)
-            i1, i2 = st.columns(2, vertical_alignment="bottom")
-            i1.number_input("Nombre d'affiches", min_value=1, max_value=50, step=1, key="w_fid_exemplaires")
-            if par_feuille > 1:
-                i2.checkbox(f"{par_feuille} affiches par feuille A4 (traits de coupe)", key="w_fid_planche")
-
-    with col_d:
-        if not (labo and (haut or bas)):
-            habillage.etat_vide([m for m, manque in (("le nom du laboratoire", not labo),
-                                                     ("l'offre", not (haut or bas))) if manque])
+if ss.fid_vue == FID_VUE_HISTORIQUE:
+    with onglet_fidelite:
+        if EN_LIGNE and not sauvegarde.activee():
+            st.warning("La sauvegarde en ligne n'est pas configurée : ces affiches seront perdues au prochain "
+                       "redémarrage de l'application (réglage HF_TOKEN à ajouter dans les secrets).")
+        if not fid_entrees:
+            st.info("Aucune affiche fidélité enregistrée. Une affiche téléchargée ou enregistrée depuis "
+                    f"« {FID_VUE_CREER} » apparaît ici automatiquement.")
         else:
-            pdf_fid = fidelite.pdf(
-                taille, labo=labo, logo_labo=logo_labo if ss.w_fid_logo_labo else None, haut=haut, bas=bas,
-                achetes=int(ss.w_fid_achetes), offerts=int(ss.w_fid_offerts), titre=ss.w_fid_titre,
-                gamme=ss.w_fid_gamme, precision=ss.w_fid_precision, style=ss.style, identite=IDENTITE,
-                logo_pharmacie=bool(ss.w_fid_logo_pharmacie),
-                majuscules=bool(ss.w_fid_majuscules))
-            st.image(apercu_png(pdf_fid, 90), use_container_width=True)
-            planche_fid = bool(ss.get("w_fid_planche", True)) and par_feuille > 1
-            pdf_imp, nb_feuilles, _ = pdf_impression(pdf_fid, taille, int(ss.w_fid_exemplaires), planche_fid)
-            nom_fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", f"fidelite_{labo}")[:50].strip("_")
-            st.download_button(f"Télécharger le PDF à imprimer ({nb_feuilles} feuille{'s' if nb_feuilles > 1 else ''})",
-                               pdf_imp, f"{nom_fichier}.pdf", "application/pdf", type="primary",
-                               icon=":material/download:", use_container_width=True)
+            f1, f2 = st.columns([2, 3], vertical_alignment="bottom")
+            recherche_fid = f1.text_input("Rechercher (laboratoire, offre)", key="fid_filtre")
+            n_fid = len(fid_entrees)
+            f2.caption(f"{n_fid} affiche{'s' if n_fid > 1 else ''} fidélité, rangée{'s' if n_fid > 1 else ''} à part "
+                       "des affiches promo et conservée" + ("s" if n_fid > 1 else "")
+                       + " jusqu'à suppression. Enregistrer à nouveau la même affiche la met à jour.")
+            mot = catalogue._norm_mot(recherche_fid)
+            visibles_fid = [e for e in fid_entrees if not mot or mot in catalogue._norm_mot(
+                f"{e.get('labo', '')} {e.get('haut', '')} {e.get('bas', '')} {e.get('gamme', '')}")]
+            if not visibles_fid:
+                st.info("Aucune affiche ne correspond à la recherche.")
+            cols_fid = st.columns(4)
+            for i, e in enumerate(visibles_fid):
+                ident = e["id"]
+                with cols_fid[i % 4]:
+                    with st.container(border=True):
+                        st.image(historique_fidelite.apercu_octets(e), use_container_width=True)
+                        st.markdown(f"**{_md(e['labo'])}**")
+                        st.caption(f"{_md(e.get('haut', ''))} {_md(e.get('bas', ''))}  \n"
+                                   f"{e.get('format', '')}{' paysage' if e.get('paysage') else ''} · "
+                                   f"enregistrée le {historique_fidelite.date_creation(e)}")
+                        st.button("Rouvrir", key=f"fid_ouv_{ident}", on_click=fid_rouvrir, args=(ident,),
+                                  use_container_width=True, help="Recharger cette affiche pour la modifier ou la réimprimer")
+                        fabriquer = _fid_fabriquer(e, CTX.dossier, IDENTITE)
+                        try:
+                            st.download_button("Télécharger le PDF", fabriquer, fid_nom_fichier(e), "application/pdf",
+                                               key=f"fid_tel_{ident}", icon=":material/download:",
+                                               use_container_width=True, on_click="ignore")
+                        except Exception:  # version de Streamlit sans téléchargement différé
+                            st.download_button("Télécharger le PDF", fabriquer(), fid_nom_fichier(e), "application/pdf",
+                                               key=f"fid_tel_{ident}", icon=":material/download:",
+                                               use_container_width=True)
+                        if ss.fid_suppr_attente == ident:
+                            st.warning("Supprimer cette affiche fidélité ?")
+                            o1, o2 = st.columns(2)
+                            o1.button("Oui, supprimer", key=f"fid_oui_{ident}", on_click=fid_confirmer_suppression,
+                                      args=(ident,), type="primary", use_container_width=True)
+                            o2.button("Annuler", key=f"fid_non_{ident}", on_click=fid_annuler_suppression,
+                                      use_container_width=True)
+                        else:
+                            st.button("Supprimer", key=f"fid_sup_{ident}", on_click=fid_demander_suppression,
+                                      args=(ident,), type="tertiary", use_container_width=True)
+else:
+    with onglet_fidelite:
+        col_g, col_d = st.columns([3, 2], gap="large")
+        with col_g:
+            st.caption("Affiche ou affichette pour le rayon ou l'espace de vente, présentant l'offre fidélité d'un "
+                       "laboratoire : logo de la pharmacie, logo du laboratoire et l'offre en dessous. Ces affiches "
+                       "ont leur propre historique, séparé de celui des affiches promo.")
+            with st.container(key="etape_fid_labo"):
+                habillage.titre_etape(1, "Laboratoire", fait=bool(ss.w_fid_labo.strip()))
+                labo = st.text_input("Nom du laboratoire ou de la marque", key="w_fid_labo",
+                                     placeholder="Santé Verte").strip()
+                if ss.fid_logos and (ss.fid_logos["cle"] != marques.cle(labo) or ss.fid_logos["n"] != ss.logo_marque_n):
+                    ss.fid_logos = None  # propositions d'un autre laboratoire, ou logo déjà choisi
+                logo_labo, origine_logo = fid_logo_labo(labo)
+                if labo:
+                    if logo_labo is not None:
+                        a, b = st.columns([1, 3], vertical_alignment="center")
+                        a.image(ip.vers_rgb_blanc(logo_labo), use_container_width=True)
+                        b.checkbox("Imprimer le logo du laboratoire (sinon son nom en toutes lettres)",
+                                   key="w_fid_logo_labo")
+                        if origine_logo == "affiche":
+                            b.caption("Logo repris de l'affiche enregistrée.")
+                    else:
+                        st.caption("Aucun logo enregistré pour ce laboratoire : son nom est écrit en toutes lettres.")
+                    with st.expander("Changer de logo" if logo_labo is not None else "Ajouter le logo du laboratoire",
+                                     expanded=bool(ss.fid_logos)):
+                        st.button(f"Chercher le logo de « {labo} »", icon=":material/search:",
+                                  on_click=fid_chercher_logo, args=(labo,), key="fid_chercher")
+                        if ss.fid_logos:
+                            afficher_propositions_logo(ss.fid_logos, "fid")
+                        fichier = st.file_uploader("Ou importer le logo (PNG, JPG)",
+                                                   type=["png", "jpg", "jpeg", "webp"],
+                                                   key=f"fid_import_{ss.fid_import_n}")
+                        if fichier is not None:
+                            fid_choisir_logo(labo, fichier.getvalue())
+                            ss.fid_import_n += 1
+                            st.rerun()
+                        st.caption("Le logo est rangé avec les logos de marques : il sert aussi aux affiches promo "
+                                   "de cette marque.")
+
+            with st.container(key="etape_fid_offre"):
+                habillage.titre_etape(2, "Offre", fait=True)
+                n1, n2 = st.columns(2)
+                n1.number_input("Produits à acheter", min_value=1, max_value=fidelite.MAX_ACHETES, step=1,
+                                key="w_fid_achetes")
+                n2.number_input("Produits offerts", min_value=1, max_value=fidelite.MAX_OFFERTS, step=1,
+                                key="w_fid_offerts")
+                st.checkbox("Écrire l'offre moi-même", key="w_fid_libre", on_change=fid_offre_libre,
+                            help="Pour une autre formulation : « 6 boîtes achetées », « la 7e offerte »…")
+                if ss.w_fid_libre:
+                    st.text_input("Petit texte (au-dessus)", key="w_fid_haut")
+                    st.text_input("Texte principal", key="w_fid_bas")
+                else:
+                    st.caption("Imprimé : " + " ".join(fidelite.textes_offre(ss.w_fid_achetes, ss.w_fid_offerts)))
+                st.text_input("Produits concernés (facultatif)", key="w_fid_gamme", placeholder="Sur toute la gamme")
+                st.text_input("Précision (facultatif)", key="w_fid_precision", placeholder=fidelite.PRECISION_EXEMPLE)
+
+            with st.container(key="etape_fid_page"):
+                habillage.titre_etape(3, "Mise en page", fait=True)
+                st.text_input("Titre (vide : sans titre)", key="w_fid_titre", placeholder=fidelite.TITRE_DEFAUT)
+                f1, f2 = st.columns(2, vertical_alignment="bottom")
+                f1.radio("Format", list(FORMATS), horizontal=True, key="w_fid_format")
+                f2.checkbox("En paysage (à l'horizontale)", key="w_fid_paysage")
+                c1, c2 = st.columns(2)
+                c1.checkbox("Logo de la pharmacie", key="w_fid_logo_pharmacie")
+                c2.checkbox("Nom du laboratoire en majuscules", key="w_fid_majuscules",
+                            help="Quand le nom est écrit en toutes lettres (pas de logo).")
+                if ss.fid_style is not None:
+                    s1, s2 = st.columns([3, 2], vertical_alignment="center")
+                    s1.caption("Couleurs et police : celles de l'affiche rouverte.")
+                    s2.button("Prendre le style en cours", on_click=fid_style_en_cours, use_container_width=True,
+                              help=f"Utiliser les couleurs et la police choisies dans l'onglet « {ONGLET_CREER} »")
+                else:
+                    st.caption(f"Couleurs et police : celles choisies dans l'onglet « {ONGLET_CREER} ».")
+
+            fid_p = fid_parametres()
+            taille_fid = fid_taille(fid_p)
+            par_feuille_fid = disposition_a4(taille_fid)[0]
+            with st.container(key="etape_fid_impression"):
+                habillage.titre_etape(4, "Impression", fait=True)
+                i1, i2 = st.columns(2, vertical_alignment="bottom")
+                i1.number_input("Nombre d'affiches", min_value=1, max_value=50, step=1, key="w_fid_exemplaires")
+                if par_feuille_fid > 1:
+                    i2.checkbox(f"{par_feuille_fid} affiches par feuille A4 (traits de coupe)", key="w_fid_planche")
+
+        with col_d:
+            if not (fid_p["labo"] and (fid_p["haut"] or fid_p["bas"])):
+                habillage.etat_vide([m for m, manque in (("le nom du laboratoire", not fid_p["labo"]),
+                                                         ("l'offre", not (fid_p["haut"] or fid_p["bas"]))) if manque])
+            else:
+                style_fid = ss.fid_style or ss.style
+                logo_imprime = logo_labo if fid_p["logo_labo"] else None
+                pdf_fid = fid_pdf(fid_p, style_fid, logo_labo, IDENTITE)
+                apercu_fid = apercu_png(pdf_fid, 90)
+                st.image(apercu_fid, use_container_width=True)
+                planche_fid = bool(ss.get("w_fid_planche", True)) and par_feuille_fid > 1
+                pdf_imp, nb_feuilles, _ = pdf_impression(pdf_fid, taille_fid, int(ss.w_fid_exemplaires), planche_fid)
+                if st.download_button(f"Télécharger le PDF à imprimer ({nb_feuilles} feuille{'s' if nb_feuilles > 1 else ''})",
+                                      pdf_imp, fid_nom_fichier(fid_p), "application/pdf", type="primary",
+                                      icon=":material/download:", use_container_width=True,
+                                      help="L'affiche est aussi enregistrée dans « Affiches enregistrées »"):
+                    fid_enregistrer(fid_p, style_fid, logo_imprime, apercu_fid, message=False)
+                    ss.fid_ouverte = historique_fidelite.identifiant(fid_p)
+                    st.toast("Affiche fidélité enregistrée.")
+                st.button("Enregistrer sans télécharger", icon=":material/save:", use_container_width=True,
+                          on_click=fid_enregistrer, args=(fid_p, style_fid, logo_imprime, apercu_fid))
 
 
 # ----------------------------------------------------------------------------

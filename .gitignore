@@ -6,3 +6,5 @@ catalogue*.csv
 historique/
 .cache/
 .streamlit/secrets.toml
+marques/
+fidelite/
