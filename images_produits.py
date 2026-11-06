@@ -20,7 +20,9 @@ import importlib
 import io
 import ipaddress
 import json
+import gc
 import re
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -194,6 +196,37 @@ def telecharger_octets(url: str, referer: str = "", max_octets: int = MAX_IMAGE_
 
 
 COTE_UTILE = 2600  # au-delà (pixels), l'image est réduite dès sa lecture : assez pour imprimer net, sans surcharger la mémoire
+# Mémoire : l'hébergement en ligne accorde environ 1 Go ; au-delà, l'application redémarre (l'utilisateur est déconnecté).
+# Pendant la recherche, les images sont téléchargées en parallèle, mais lues et jugées 2 à la fois au plus, sur une version
+# réduite (COTE_ANALYSE) : une recherche de 55 grandes photos est ainsi passée d'environ 1 950 Mo à quelques centaines.
+ANALYSES_SIMULTANEES = threading.BoundedSemaphore(2)
+COTE_ANALYSE = 1600   # pixels (grand côté) de la version réduite servant à juger une photo
+PHOTOS_GARDEES = 12   # propositions dont le fichier est gardé en mémoire (les autres sont retéléchargées si choisies)
+
+
+def _limiter_arenes_memoire():
+    """Linux : la mémoire libérée par les tâches parallèles reste réservée par « arène » (une par tâche) et n'est pas
+    rendue au système ; on limite leur nombre à 2. Sans effet ailleurs (Windows, Mac)."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallopt(-8, 2)  # M_ARENA_MAX
+        return libc
+    except Exception:
+        return None
+
+
+_LIBC = _limiter_arenes_memoire()
+
+
+def rendre_memoire():
+    """Rend au système la mémoire libérée (images examinées pendant une recherche)."""
+    gc.collect()
+    try:
+        if _LIBC is not None:
+            _LIBC.malloc_trim(0)
+    except Exception:
+        pass
 
 
 def _ouvrir(octets: bytes) -> Image.Image:
@@ -353,7 +386,8 @@ def version_grande(url: str, img: Image.Image, referer: str = "", delai=(3, 8)):
     for v in variantes_grandes(url):
         try:
             octets = telecharger_octets(v, referer=referer, delai=delai)
-            produit = rogner_marges_blanches(vers_rgb_blanc(_ouvrir(octets)))
+            with ANALYSES_SIMULTANEES:
+                produit = rogner_marges_blanches(vers_rgb_blanc(_ouvrir(octets)))
         except Exception:
             continue
         if (max(produit.size) < max(actuel.size) * 1.2 or not _meme_image(emp_ref, _empreinte(produit))
@@ -1212,26 +1246,49 @@ def _evaluer_image(url, page, rang=0):
     Les dimensions retenues sont celles du produit lui-même, marges blanches retirées (comme à l'impression)."""
     try:
         octets = telecharger_octets(url, referer=page["url"], delai=(4, 12))
-        img = _ouvrir(octets)
     except Exception:
         return None
+    with ANALYSES_SIMULTANEES:
+        try:
+            rgb, echelle = _pour_analyse(octets)
+        except Exception:
+            return None
+        if max(rgb.size) > 3 * min(rgb.size):
+            return None  # bandeau
+        produit = rogner_marges_blanches(rgb)  # un petit flacon au milieu d'un grand fond blanc reste petit
+        if min(produit.size) * echelle < 40:
+            return None  # image vide ou presque
+        return _candidat(url, octets, rgb, produit, page, rang, echelle)
+
+
+def _pour_analyse(octets: bytes):
+    """(image RVB réduite à COTE_ANALYSE au plus, facteur pour revenir aux dimensions réelles) : on juge une photo sur
+    une version réduite, bien plus légère en mémoire ; ses dimensions et sa netteté sont ramenées à l'échelle réelle."""
+    img = Image.open(io.BytesIO(octets))
+    reelle = max(img.size)
+    if reelle > COTE_ANALYSE:
+        try:
+            img.draft("RGB", (COTE_ANALYSE * 3 // 4, COTE_ANALYSE * 3 // 4))  # JPEG : décodé directement en réduit
+        except Exception:
+            pass
+    img.load()
+    if max(img.size) > COTE_ANALYSE:
+        img.thumbnail((COTE_ANALYSE, COTE_ANALYSE), Image.BILINEAR)
     rgb = vers_rgb_blanc(img)
-    if max(rgb.size) > 3 * min(rgb.size):
-        return None  # bandeau
-    produit = rogner_marges_blanches(rgb)  # un petit flacon au milieu d'un grand fond blanc reste petit
-    if min(produit.size) < 40:
-        return None  # image vide ou presque
-    return _candidat(url, octets, rgb, produit, page, rang)
+    del img
+    return rgb, reelle / max(rgb.size)
 
 
-def _candidat(url, octets, rgb, produit, page, rang=0):
+def _candidat(url, octets, rgb, produit, page, rang=0, echelle=1.0):
+    """echelle : rapport entre l'image réelle et la version réduite analysée (dimensions et netteté réelles)."""
     a = analyser_image(rgb)
     q = produit_seul(rgb)
     mini = rgb.copy()
     mini.thumbnail((320, 320))
     return {"miniature": mini, "image": url, "octets": octets if len(octets) <= 2_500_000 else None,
             "titre": page.get("nom", ""), "site": page["site"], "page": page["url"],
-            "largeur": produit.width, "hauteur": produit.height, "nette": resolution_effective(produit),
+            "largeur": round(produit.width * echelle), "hauteur": round(produit.height * echelle),
+            "nette": round(resolution_effective(produit) * echelle),
             "blanc": a["blanc"], "studio": a["studio"], "seul": q["seul"], "objets": q["objets"],
             "pastilles": q["pastilles"],
             "verifie": page["niveau"] in NIVEAUX_VERIFIES, "niveau": page["niveau"], "sites": {page["site"]},
@@ -1267,16 +1324,19 @@ def _evaluer_image_web(r, niveau):
             "nom": r.get("title") or ""}
     try:
         octets = telecharger_octets(url, referer=page["url"], delai=(4, 10))
-        img = _ouvrir(octets)
     except Exception:
         return None
-    rgb = vers_rgb_blanc(img)
-    if max(rgb.size) > 3 * min(rgb.size):
-        return None
-    produit = rogner_marges_blanches(rgb)
-    if min(produit.size) < 40:
-        return None
-    return _candidat(url, octets, rgb, produit, page)
+    with ANALYSES_SIMULTANEES:
+        try:
+            rgb, echelle = _pour_analyse(octets)
+        except Exception:
+            return None
+        if max(rgb.size) > 3 * min(rgb.size):
+            return None
+        produit = rogner_marges_blanches(rgb)
+        if min(produit.size) * echelle < 40:
+            return None
+        return _candidat(url, octets, rgb, produit, page, 0, echelle)
 
 
 def _candidats_web(bruts, code, nom="", deja=(), maxi=16):
@@ -1332,14 +1392,21 @@ def _agrandir_candidat(c):
     nette, nouveau = c["nette"], None
     for url, page in list(c["_sources"])[:3]:
         try:
-            img = (_ouvrir(c["octets"]) if (c.get("octets") and url == c["image"])
-                   else telecharger_image(url, referer=page["url"]))
+            if c.get("octets") and url == c["image"]:
+                octets_ = c["octets"]
+            else:
+                octets_ = telecharger_octets(url, referer=page["url"])
+            with ANALYSES_SIMULTANEES:
+                img = vers_rgb_blanc(_ouvrir(octets_))  # petite image (moins de 1 500 px) : c'est elle qu'on agrandit
             mieux = version_grande(url, img, referer=page["url"])
+            del img
         except Exception:
             continue
         if mieux and mieux["eff"] > nette * GAIN_MINI:
-            rgb = vers_rgb_blanc(_ouvrir(mieux["octets"]))
-            cand = _candidat(mieux["url"], mieux["octets"], rgb, mieux["img"], page)
+            mieux.pop("img", None)
+            with ANALYSES_SIMULTANEES:
+                rgb, echelle = _pour_analyse(mieux["octets"])
+                cand = _candidat(mieux["url"], mieux["octets"], rgb, rogner_marges_blanches(rgb), page, 0, echelle)
             nouveau = {k: cand[k] for k in _CHAMPS_PHOTO}
             nouveau["agrandie"] = True
             nette = cand["nette"]
@@ -1444,6 +1511,8 @@ def _classer(candidats):
         c.pop("_sources", None)
     # belles photos d'abord ; les photos trop médiocres (floues, sans fond blanc, encombrées) ne viennent qu'après
     uniques.sort(key=lambda c: (c["beaute"] < BEAUTE_MINI, -c["score"]))
+    for c in uniques[PHOTOS_GARDEES:]:
+        c["octets"] = None  # retéléchargée si elle est choisie (voir obtenir_image)
     return uniques
 
 
@@ -1681,4 +1750,6 @@ def _rechercher_visuels(code, nom="", requetes_extra=(), nombre=12, progression=
     else:
         j.append("Aucune photo utilisable n'a été trouvée.")
     j.append(f"Durée : {time.time() - debut:.0f} s, {compte['pages']} pages examinées.")
+    del tous, de_pages, du_web
+    rendre_memoire()  # rend tout de suite la mémoire des images examinées (l'hébergement en ligne en accorde peu)
     return sortie
