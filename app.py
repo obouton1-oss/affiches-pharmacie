@@ -20,6 +20,7 @@ from reportlab.lib.units import mm
 import acces
 import catalogue
 import elements_libres as libres
+import fidelite
 import habillage
 import historique
 import images_produits as ip
@@ -128,16 +129,16 @@ elif st.session_state.pop("retour_ecran_nouveau_type", False):
     _garder_les_champs()
 
 ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE = "Créer une affiche", "Historique", "Page A4 regroupée"
-ONGLET_PHARMACIE = "Ma pharmacie"
-_noms_onglets = [ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE] + ([ONGLET_PHARMACIE] if MULTI else [])
+ONGLET_FIDELITE, ONGLET_PHARMACIE = "Cartes de fidélité", "Ma pharmacie"
+_noms_onglets = [ONGLET_CREER, ONGLET_HISTORIQUE, ONGLET_PAGE, ONGLET_FIDELITE] + ([ONGLET_PHARMACIE] if MULTI else [])
 try:  # versions récentes de Streamlit : l'onglet affiché peut être changé par l'application
     _onglets = st.tabs(_noms_onglets, key="onglet", on_change="rerun")
     ONGLETS_PILOTABLES = True
 except TypeError:
     _onglets = st.tabs(_noms_onglets)
     ONGLETS_PILOTABLES = False
-onglet_creer, onglet_hist, onglet_page = _onglets[:3]
-onglet_pharmacie = _onglets[3] if MULTI else None
+onglet_creer, onglet_hist, onglet_page, onglet_fidelite = _onglets[:4]
+onglet_pharmacie = _onglets[4] if MULTI else None
 
 recherche_produit = components.declare_component(
     "recherche_produit", path=str(Path(__file__).parent / "composant_recherche"))
@@ -2122,6 +2123,144 @@ with onglet_page:
     with col_d:
         for i, png_page in enumerate(apercus):
             st.image(png_page, caption=f"Feuille {i + 1} sur {len(apercus)}", use_container_width=True)
+
+
+# ----------------------------------------------------------------------------
+# Onglet « Cartes de fidélité » : affiche ou affichette d'un programme de fidélité d'un laboratoire
+# (« Santé Verte : 6 produits achetés + 1 offert »), avec le logo de la pharmacie et celui du laboratoire
+# ----------------------------------------------------------------------------
+for cle, defaut in (("w_fid_labo", ""), ("w_fid_achetes", fidelite.ACHETES_DEFAUT),
+                    ("w_fid_offerts", fidelite.OFFERTS_DEFAUT), ("w_fid_libre", False), ("w_fid_haut", ""),
+                    ("w_fid_bas", ""), ("w_fid_gamme", ""), ("w_fid_precision", fidelite.PRECISION_EXEMPLE),
+                    ("w_fid_titre", fidelite.TITRE_DEFAUT), ("w_fid_cases", True), ("w_fid_logo_labo", True),
+                    ("w_fid_logo_pharmacie", True), ("w_fid_majuscules", True), ("w_fid_format", "A5"),
+                    ("w_fid_paysage", False), ("w_fid_exemplaires", 1), ("w_fid_planche", True),
+                    ("fid_logos", None), ("fid_import_n", 0), ("fid_msg", "")):
+    ss.setdefault(cle, defaut)
+
+
+def fid_offre_libre():
+    """Case « Écrire l'offre moi-même » cochée : les deux champs partent du texte calculé."""
+    if ss.w_fid_libre:
+        ss.w_fid_haut, ss.w_fid_bas = fidelite.textes_offre(ss.w_fid_achetes, ss.w_fid_offerts)
+
+
+def fid_choisir_logo(labo, octets):
+    k, message = marques.enregistrer(CTX.dossier, labo, octets)
+    ss.fid_msg = message
+    if k:
+        ss.fid_logos = None
+        ss.w_fid_logo_labo = True
+
+
+def fid_chercher_logo(labo):
+    trouves, message, _incidents = logos_marques.chercher(labo, web="si_besoin")
+    ss.fid_logos = {"cle": marques.cle(labo), "marque": labo, "props": trouves, "msg": message,
+                    "n": ss.logo_marque_n}
+
+
+with onglet_fidelite:
+    col_g, col_d = st.columns([3, 2], gap="large")
+    with col_g:
+        st.caption("Affiche ou affichette pour la carte de fidélité d'un laboratoire : logo de la pharmacie, logo du "
+                   "laboratoire et l'offre en dessous. Polices et couleurs : celles choisies dans l'onglet "
+                   f"« {ONGLET_CREER} ».")
+        with st.container(key="etape_fid_labo"):
+            habillage.titre_etape(1, "Laboratoire", fait=bool(ss.w_fid_labo.strip()))
+            labo = st.text_input("Nom du laboratoire ou de la marque", key="w_fid_labo",
+                                 placeholder="Santé Verte").strip()
+            cle_logo = marques.trouver(CTX.dossier, labo) if labo else None
+            logo_labo = marques.charger(CTX.dossier, cle_logo) if cle_logo else None
+            if ss.fid_logos and (ss.fid_logos["cle"] != marques.cle(labo) or ss.fid_logos["n"] != ss.logo_marque_n):
+                ss.fid_logos = None  # propositions d'un autre laboratoire, ou logo déjà choisi
+            if ss.fid_msg:
+                st.toast(ss.fid_msg)
+                ss.fid_msg = ""
+            if labo:
+                if logo_labo is not None:
+                    a, b = st.columns([1, 3], vertical_alignment="center")
+                    a.image(ip.vers_rgb_blanc(logo_labo), use_container_width=True)
+                    b.checkbox("Imprimer le logo du laboratoire (sinon son nom en toutes lettres)",
+                               key="w_fid_logo_labo")
+                else:
+                    st.caption("Aucun logo enregistré pour ce laboratoire : son nom est écrit en toutes lettres.")
+                with st.expander("Changer de logo" if logo_labo is not None else "Ajouter le logo du laboratoire",
+                                 expanded=bool(ss.fid_logos)):
+                    st.button(f"Chercher le logo de « {labo} »", icon=":material/search:", on_click=fid_chercher_logo,
+                              args=(labo,), key="fid_chercher")
+                    if ss.fid_logos:
+                        afficher_propositions_logo(ss.fid_logos, "fid")
+                    fichier = st.file_uploader("Ou importer le logo (PNG, JPG)", type=["png", "jpg", "jpeg", "webp"],
+                                               key=f"fid_import_{ss.fid_import_n}")
+                    if fichier is not None:
+                        fid_choisir_logo(labo, fichier.getvalue())
+                        ss.fid_import_n += 1
+                        st.rerun()
+                    st.caption("Le logo est rangé avec les logos de marques : il sert aussi aux affiches promo "
+                               "de cette marque.")
+
+        with st.container(key="etape_fid_offre"):
+            habillage.titre_etape(2, "Offre", fait=True)
+            n1, n2 = st.columns(2)
+            n1.number_input("Produits à acheter", min_value=1, max_value=fidelite.MAX_ACHETES, step=1,
+                            key="w_fid_achetes")
+            n2.number_input("Produits offerts", min_value=1, max_value=fidelite.MAX_OFFERTS, step=1,
+                            key="w_fid_offerts")
+            st.checkbox("Écrire l'offre moi-même", key="w_fid_libre", on_change=fid_offre_libre,
+                        help="Pour une autre formulation : « 6 boîtes achetées », « la 7e offerte »…")
+            if ss.w_fid_libre:
+                st.text_input("Petit texte (au-dessus)", key="w_fid_haut")
+                st.text_input("Texte principal", key="w_fid_bas")
+                haut, bas = ss.w_fid_haut.strip(), ss.w_fid_bas.strip()
+            else:
+                haut, bas = fidelite.textes_offre(ss.w_fid_achetes, ss.w_fid_offerts)
+                st.caption(f"Imprimé : {haut} {bas}")
+            st.text_input("Produits concernés (facultatif)", key="w_fid_gamme",
+                          placeholder="Sur toute la gamme")
+            st.text_input("Précision (facultatif)", key="w_fid_precision", placeholder=fidelite.PRECISION_EXEMPLE)
+
+        with st.container(key="etape_fid_page"):
+            habillage.titre_etape(3, "Mise en page", fait=True)
+            st.text_input("Titre (vide : sans titre)", key="w_fid_titre", placeholder=fidelite.TITRE_DEFAUT)
+            f1, f2 = st.columns(2, vertical_alignment="bottom")
+            f1.radio("Format", list(FORMATS), horizontal=True, key="w_fid_format")
+            f2.checkbox("En paysage (à l'horizontale)", key="w_fid_paysage")
+            n_cases = ss.w_fid_achetes + ss.w_fid_offerts
+            st.checkbox("Dessiner les cases de la carte (une par produit acheté, puis « offert »)", key="w_fid_cases",
+                        disabled=n_cases > fidelite.MAX_CASES,
+                        help=f"{fidelite.MAX_CASES} cases au plus." if n_cases > fidelite.MAX_CASES else None)
+            c1, c2 = st.columns(2)
+            c1.checkbox("Logo de la pharmacie", key="w_fid_logo_pharmacie")
+            c2.checkbox("Nom du laboratoire en majuscules", key="w_fid_majuscules",
+                        help="Quand le nom est écrit en toutes lettres (pas de logo).")
+
+        taille = orienter(FORMATS[ss.w_fid_format], ss.w_fid_paysage)
+        par_feuille = disposition_a4(taille)[0]
+        with st.container(key="etape_fid_impression"):
+            habillage.titre_etape(4, "Impression", fait=True)
+            i1, i2 = st.columns(2, vertical_alignment="bottom")
+            i1.number_input("Nombre d'affiches", min_value=1, max_value=50, step=1, key="w_fid_exemplaires")
+            if par_feuille > 1:
+                i2.checkbox(f"{par_feuille} affiches par feuille A4 (traits de coupe)", key="w_fid_planche")
+
+    with col_d:
+        if not (labo and (haut or bas)):
+            habillage.etat_vide([m for m, manque in (("le nom du laboratoire", not labo),
+                                                     ("l'offre", not (haut or bas))) if manque])
+        else:
+            pdf_fid = fidelite.pdf(
+                taille, labo=labo, logo_labo=logo_labo if ss.w_fid_logo_labo else None, haut=haut, bas=bas,
+                achetes=int(ss.w_fid_achetes), offerts=int(ss.w_fid_offerts), titre=ss.w_fid_titre,
+                gamme=ss.w_fid_gamme, precision=ss.w_fid_precision, style=ss.style, identite=IDENTITE,
+                logo_pharmacie=bool(ss.w_fid_logo_pharmacie), cases=bool(ss.w_fid_cases),
+                majuscules=bool(ss.w_fid_majuscules))
+            st.image(apercu_png(pdf_fid, 90), use_container_width=True)
+            planche_fid = bool(ss.get("w_fid_planche", True)) and par_feuille > 1
+            pdf_imp, nb_feuilles, _ = pdf_impression(pdf_fid, taille, int(ss.w_fid_exemplaires), planche_fid)
+            nom_fichier = re.sub(r"[^A-Za-z0-9_-]+", "_", f"fidelite_{labo}")[:50].strip("_")
+            st.download_button(f"Télécharger le PDF à imprimer ({nb_feuilles} feuille{'s' if nb_feuilles > 1 else ''})",
+                               pdf_imp, f"{nom_fichier}.pdf", "application/pdf", type="primary",
+                               icon=":material/download:", use_container_width=True)
 
 
 # ----------------------------------------------------------------------------
