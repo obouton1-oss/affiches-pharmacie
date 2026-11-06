@@ -25,11 +25,17 @@ MOINS = "–"  # tiret demi-cadratin : présent dans toutes les polices de l'out
 # Valeurs de départ de tous les champs (le type choisi n'en utilise qu'une partie)
 CHAMPS_DEFAUT = {"pct": 20, "rang": 2, "n": 3, "m": 2, "achetes": 2, "offerts": 1, "montant": "3",
                  "prix_normal": "", "prix_lot": "", "prix_unite": "", "prix": "", "seuil": "50", "valeur": "10",
-                 "unite": "€", "cadeau": "", "cond": "aucune", "kicker": "", "grand": "", "precision": ""}
+                 "unite": "€", "cadeau": "", "cond": "aucune", "kicker": "", "grand": "", "precision": "",
+                 # remise par paliers (jusqu'à 3 paliers : montant d'achat à atteindre et remise obtenue)
+                 "seuil1": "30", "valeur1": "5", "seuil2": "50", "valeur2": "10", "seuil3": "", "valeur3": ""}
 OPTIONS_DEFAUT = {"pastille": True, "barre": True, "calcul": True, "calcul_fmt": "total"}
 
 _PRIX_NORMAL = dict(nom="prix_normal", libelle="Prix normal d'un produit (€)", genre="prix", placeholder="10,50",
                     facultatif=True)
+
+# Nature de l'avantage obtenu à partir d'un montant d'achat (types « seuil » et « paliers »)
+CHOIX_AVANTAGE = [("€", "Remise en euros (–10 €)"), ("%", "Remise en pourcentage (–10 %)"),
+                  ("bon", "Bon d'achat offert (10 € offerts)")]
 
 # Ordre des types = ordre du menu déroulant.
 # champs : nom, libellé, genre (entier / prix / texte / choix) ; « si » = champ affiché seulement pour une valeur donnée.
@@ -111,12 +117,30 @@ TYPES = {
         "options": ["barre", "calcul"],
     },
     "seuil": {
-        "libelle": "Remise selon le montant d'achat  ·  –10 € dès 50 € d'achat",
-        "aide": "Remise sur le panier, à partir d'un montant d'achat.",
+        "libelle": "Montant d'achat à atteindre  ·  –10 € dès 50 € d'achat",
+        "aide": "Remise ou bon d'achat à partir d'un montant d'achat (sur le panier, une marque, un rayon…). "
+                "Préciser sur quoi porte l'offre dans « Précision sous l'offre ».",
         "champs": [dict(nom="seuil", libelle="À partir de … € d'achat", genre="prix", placeholder="50"),
-                   dict(nom="valeur", libelle="Remise", genre="prix", placeholder="10"),
-                   dict(nom="unite", libelle="Unité de la remise", genre="choix", choix=["€", "%"])],
+                   dict(nom="valeur", libelle="Avantage (montant ou pourcentage)", genre="prix", placeholder="10"),
+                   dict(nom="unite", libelle="Nature de l'avantage", genre="choix", choix=CHOIX_AVANTAGE)],
         "defauts": {"seuil": "50", "valeur": "10", "unite": "€"},
+        "options": [],
+    },
+    "paliers": {
+        "libelle": "Remise par paliers d'achat  ·  –5 € dès 30 €, –10 € dès 50 €",
+        "aide": "Plus le montant d'achat est élevé, plus la remise est forte (2 ou 3 paliers). L'affiche met en "
+                "avant la meilleure remise (« jusqu'à –10 € ») et détaille les paliers dessous.",
+        "champs": [dict(nom="seuil1", libelle="1er palier : dès … € d'achat", genre="prix", placeholder="30"),
+                   dict(nom="valeur1", libelle="1er palier : avantage", genre="prix", placeholder="5"),
+                   dict(nom="seuil2", libelle="2e palier : dès … € d'achat", genre="prix", placeholder="50"),
+                   dict(nom="valeur2", libelle="2e palier : avantage", genre="prix", placeholder="10"),
+                   dict(nom="seuil3", libelle="3e palier : dès … € d'achat (facultatif)", genre="prix",
+                        placeholder="80", facultatif=True),
+                   dict(nom="valeur3", libelle="3e palier : avantage (facultatif)", genre="prix", placeholder="15",
+                        facultatif=True),
+                   dict(nom="unite", libelle="Nature de l'avantage", genre="choix", choix=CHOIX_AVANTAGE)],
+        "defauts": {"seuil1": "30", "valeur1": "5", "seuil2": "50", "valeur2": "10", "seuil3": "", "valeur3": "",
+                    "unite": "€"},
         "options": [],
     },
     "cadeau": {
@@ -143,8 +167,10 @@ TYPES = {
         "options": [],
     },
     "libre": {
-        "libelle": "Autre offre (texte libre)",
-        "aide": "Pour toute offre non prévue ci-dessus : le texte principal est écrit en grand dans le bandeau.",
+        "libelle": "Offre personnalisée (texte libre)  ·  journée conseil, opération spéciale…",
+        "aide": "Pour toute offre non prévue ci-dessus : un petit texte au-dessus (facultatif), le texte principal "
+                "en grand dans le bandeau, et « Précision sous l'offre » pour les conditions. Exemples : « Journée "
+                "conseil » / « –15 % sur les soins » / « le samedi 14 novembre ».",
         "champs": [dict(nom="kicker", libelle="Petit texte au-dessus (facultatif)", genre="texte",
                         placeholder="Journée de la peau", facultatif=True),
                    dict(nom="grand", libelle="Texte principal (en grand)", genre="texte", placeholder="–15 % en cabine")],
@@ -369,16 +395,58 @@ def _prix_degressif(ch, op, res):
         res["resume"] = f"Soit {eur(unite * n)} les {n}."
 
 
+def _avantage(valeur, unite) -> str:
+    """Texte de l'avantage : « –10 € », « –10 % » ou « 10 € OFFERTS » (bon d'achat)."""
+    if unite == "%":
+        return pct_texte(valeur)
+    if unite == "bon":
+        return f"{eur(valeur)} OFFERTS"
+    return MOINS + eur(valeur)
+
+
 def _seuil(ch, op, res):
     seuil = _prix(ch, "seuil", "Montant d'achat", res, obligatoire=True)
-    valeur = _prix(ch, "valeur", "Remise", res, obligatoire=True)
-    pourcent = ch.get("unite") == "%"
-    if pourcent and valeur is not None and valeur >= 100:
+    valeur = _prix(ch, "valeur", "Avantage", res, obligatoire=True)
+    unite = ch.get("unite") or "€"
+    if unite == "%" and valeur is not None and valeur >= 100:
         res["erreurs"].append("Remise : doit être inférieure à 100 %.")
     if seuil is None or valeur is None or res["erreurs"]:
         return
-    res["rendu"] = {"kicker": f"DÈS {eur(seuil)} D'ACHAT",
-                    "grand": pct_texte(valeur) if pourcent else MOINS + eur(valeur), "lignes": []}
+    res["rendu"] = {"kicker": f"DÈS {eur(seuil)} D'ACHAT", "grand": _avantage(valeur, unite),
+                    "lignes": ["en bon d'achat"] if unite == "bon" else []}
+
+
+def _paliers(ch, op, res):
+    unite = ch.get("unite") or "€"
+    paliers = []
+    for i in (1, 2, 3):
+        facultatif = i == 3
+        brut_s, brut_v = str(ch.get(f"seuil{i}") or "").strip(), str(ch.get(f"valeur{i}") or "").strip()
+        if facultatif and not brut_s and not brut_v:
+            continue
+        seuil = _prix(ch, f"seuil{i}", f"Palier {i} : montant d'achat", res, obligatoire=True)
+        valeur = _prix(ch, f"valeur{i}", f"Palier {i} : avantage", res, obligatoire=True)
+        if unite == "%" and valeur is not None and valeur >= 100:
+            res["erreurs"].append(f"Palier {i} : la remise doit être inférieure à 100 %.")
+        paliers.append((seuil, valeur))
+    if res["erreurs"]:
+        return
+    for (s1, v1), (s2, v2) in zip(paliers, paliers[1:]):
+        if s2 <= s1 or v2 <= v1:
+            res["erreurs"].append("Chaque palier doit demander un montant d'achat plus élevé et donner un avantage "
+                                  "plus fort que le précédent.")
+            return
+    lignes = []
+    for seuil, valeur in paliers:
+        if unite == "bon":
+            lignes.append(f"{eur(valeur)} offerts dès {eur(seuil)} d'achat")
+        else:
+            lignes.append(f"{_avantage(valeur, unite)} dès {eur(seuil)} d'achat")
+    if unite == "bon":
+        lignes.append("en bon d'achat")
+    res["rendu"] = {"kicker": "JUSQU'À", "grand": _avantage(paliers[-1][1], unite), "lignes": lignes,
+                    "ligne_forte": True}  # les paliers sont écrits plus grand que d'habitude sous l'offre
+    res["resume"] = " · ".join(sans_balises(l) for l in lignes)
 
 
 def _cadeau(ch, op, res):
@@ -418,7 +486,7 @@ def _libre(ch, op, res):
 
 _COMPOSEURS = {"pourcentage": _pourcentage, "montant": _montant, "pct_nieme": _pct_nieme, "pct_lot": _pct_lot,
                "offert": _offert, "n_pour_m": _n_pour_m, "prix_lot": _prix_lot, "prix_degressif": _prix_degressif,
-               "seuil": _seuil, "cadeau": _cadeau, "plus_produit": _plus_produit, "libre": _libre}
+               "seuil": _seuil, "paliers": _paliers, "cadeau": _cadeau, "plus_produit": _plus_produit, "libre": _libre}
 
 
 def champs_visibles(type_: str, champs: dict):
@@ -492,7 +560,7 @@ def resume_entree(entree: dict) -> str:
         return texte
     kicker = rendu.get("kicker") or ""
     if rendu.get("grand"):
-        liaison = " " if not kicker or kicker.endswith(" À") else " : "  # « Le 2e à –50 % », « Lot de 3 : –30 % »
+        liaison = " " if not kicker or kicker.endswith("À") else " : "  # « Le 2e à –50 % », « Jusqu'à –10 € »
         texte = _phrase(f"{kicker}{liaison}{rendu['grand']}".strip())
     else:
         texte = _phrase(f"{kicker} : {eur(rendu['prix'])}" if kicker else eur(rendu["prix"]))

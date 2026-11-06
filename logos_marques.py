@@ -4,6 +4,8 @@ L'outil propose plusieurs logos ; c'est la pharmacie qui choisit celui à garder
 Aucun logo n'est enregistré sans ce choix : un nom de marque peut désigner autre chose (une revue, une commune…).
 
 Sources, par ordre de confiance :
+  0. le site officiel de la marque (trouvé par les moteurs de recherche, ou à une adresse devinée comme nuxe.com) :
+     logo déclaré par le site, image ou dessin vectoriel (SVG, converti en PNG) de l'en-tête de sa page d'accueil ;
   1. Wikidata : le logo officiel déclaré pour l'entreprise ou la marque (nom identique et description de marque exigés) ;
   2. Wikipédia et Wikimedia Commons : fichiers dont le titre est le nom de la marque suivi de « logo » (ou le nom seul) ;
      les logos en SVG sont fournis en PNG à fond transparent ;
@@ -17,7 +19,7 @@ import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from PIL import Image
@@ -270,6 +272,310 @@ def propositions_web(marque: str, nombre: int = 6, bruts=None):
     return gardes[:nombre], incidents
 
 
+# --------------------------------------------------------------------------- Site officiel de la marque
+# Le logo le plus sûr et le plus à jour est celui que la marque affiche sur son propre site : on trouve le site
+# (moteurs de recherche, ou adresses devinées comme nuxe.com, pileje.fr, sans dépendre des moteurs), puis on lit sa
+# page d'accueil : logo déclaré pour les moteurs (données « schema.org »), images et dessins vectoriels (SVG) de
+# l'en-tête dont le nom, la classe ou le texte de remplacement parlent de logo ou de la marque.
+COTE_RENDU_SVG = 1200          # pixels : les logos vectoriels du site sont convertis en PNG de cette taille (grand côté)
+MAX_SITES = 3                  # sites officiels possibles examinés au plus
+MOTS_A_EVITER = ("footer", "pied", "partenaire", "partner", "paiement", "payment", "social", "facebook", "instagram",
+                 "youtube", "twitter", "linkedin", "tiktok", "pinterest", "label", "certif", "award", "prix-", "trustpilot",
+                 "avis-verifies", "app-store", "google-play", "appstore", "playstore", "flag", "drapeau", "icon-",
+                 "picto", "loader", "spinner", "cart", "panier", "search", "recherche", "menu", "burger")
+DOMAINE_A_VENDRE = re.compile(r"for sale|à vendre|a vendre|domain (is )?parked|parking|buy this domain|"
+                              r"domaine (est )?en vente|coming soon|bient[oô]t disponible", re.I)
+_LOGO_JSONLD = re.compile(r'"logo"\s*:\s*(?:\{[^{}]*?"(?:url|contentUrl)"\s*:\s*)?"([^"]+)"')
+
+
+def _domaine(url: str) -> str:
+    try:
+        hote = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return hote[4:] if hote.startswith("www.") else hote
+
+
+def _domaine_de_marque(url: str, jetons) -> bool:
+    """Le nom de domaine contient tous les mots de la marque (nuxe.com, eau-thermale-avene.fr, pileje.fr…)."""
+    dom = _domaine(url)
+    if not dom or any(d in dom for d in ip.DOMAINES_IGNORES):
+        return False
+    etiquette = _compact(dom.rsplit(".", 1)[0])
+    return all(j in etiquette for j in jetons)
+
+
+def _adresses_devinees(marque: str, jetons) -> list[str]:
+    """Adresses probables du site de la marque : nom collé ou avec des tirets, en .fr et en .com."""
+    mots = [m for m in _mots(marque) if m not in GENERIQUES] or list(jetons)
+    bases = []
+    for b in ("".join(jetons), "-".join(jetons), "".join(mots), "-".join(mots)):
+        if b and b not in bases:
+            bases.append(b)
+    return [f"https://www.{b}.{tld}/" for b in bases[:3] for tld in ("fr", "com")]
+
+
+def _sites_officiels(marque: str, jetons, incidents) -> list[str]:
+    """Pages d'accueil possibles du site de la marque : celles des résultats de recherche d'abord, puis les adresses
+    devinées (essayées même si les moteurs de recherche ne répondent pas)."""
+    trouves = []
+    try:
+        lots, erreurs = ip._recherches("text", [f"{marque} site officiel", f"{marque} laboratoire"],
+                                       region="fr-fr", max_results=10)
+        if erreurs and not any(lots):
+            incidents.append(f"Recherche du site officiel — {erreurs[0]}")
+        for lot in lots:
+            for r in lot:
+                u = (r.get("href") or "").strip()
+                if u.startswith("http") and _domaine_de_marque(u, jetons):
+                    trouves.append(f"{urlparse(u).scheme}://{urlparse(u).netloc}/")
+    except Exception as e:
+        incidents.append(f"Recherche du site officiel — {ip._detail_erreur(e)}")
+    # domaine le plus court d'abord (nuxe.com avant nuxe-boutique-exemple.fr)
+    trouves = sorted(dict.fromkeys(trouves), key=lambda u: (len(_domaine(u)), not _domaine(u).endswith(".fr")))
+    devinees = [u for u in _adresses_devinees(marque, jetons) if _domaine(u) not in {_domaine(t) for t in trouves}]
+    return trouves[:MAX_SITES] + devinees
+
+
+def _contexte(el, niveaux=3) -> str:
+    """Classe, identifiant, texte de remplacement, titre et lien d'un élément et de ses parents proches."""
+    morceaux, n = [], 0
+    while el is not None and n <= niveaux:
+        for att in ("class", "id", "alt", "title", "aria-label", "href", "data-testid"):
+            v = el.get(att) if hasattr(el, "get") else None
+            if v:
+                morceaux.append(str(v))
+        tag = getattr(el, "tag", "")
+        if isinstance(tag, str) and tag.lower() in ("header", "footer", "nav"):
+            morceaux.append(tag.lower())
+        el, n = el.getparent(), n + 1
+    return " ".join(morceaux).lower()
+
+
+def _dans(el, balise) -> bool:
+    while el is not None:
+        if isinstance(getattr(el, "tag", None), str) and el.tag.lower() == balise:
+            return True
+        el = el.getparent()
+    return False
+
+
+def _source_image(img) -> str:
+    """Adresse d'une balise <img> : src, ou les variantes paresseuses (data-src…), ou la plus grande du srcset."""
+    for att in ("src", "data-src", "data-lazy-src", "data-original"):
+        v = (img.get(att) or "").strip()
+        if v and not v.startswith("data:"):
+            return v
+    srcset = img.get("srcset") or img.get("data-srcset") or ""
+    meilleur, taille = "", -1
+    for part in srcset.split(","):
+        bouts = part.strip().split()
+        if bouts:
+            try:
+                t = float(bouts[1].rstrip("wx")) if len(bouts) > 1 else 1.0
+            except ValueError:
+                t = 1.0
+            if t > taille:
+                meilleur, taille = bouts[0], t
+    return meilleur
+
+
+def candidats_logo_page(html: str, base_url: str, jetons) -> list[dict]:
+    """Logos possibles d'une page d'accueil, du plus probable au moins probable. Chaque candidat : {url} ou {svg}
+    (dessin vectoriel écrit dans la page), avec un score."""
+    try:
+        import lxml.html
+        doc = lxml.html.fromstring(html)
+    except Exception:
+        return []
+    marque_compacte = "".join(jetons)
+    cands = []
+
+    def a_eviter(ctx):
+        return any(m in ctx for m in MOTS_A_EVITER)
+
+    # 1. logo déclaré pour les moteurs de recherche (schema.org Organization / Brand)
+    for script in doc.xpath('//script[contains(translate(@type,"LDJSON","ldjson"),"ld+json")]/text()'):
+        for m in _LOGO_JSONLD.finditer(script or ""):
+            u = m.group(1).replace("\\/", "/").strip()
+            if u and not u.startswith("data:"):
+                cands.append({"url": urljoin(base_url, u), "score": 9.0, "origine": "logo déclaré par le site"})
+    # 2. images de l'en-tête ou dont le contexte parle de logo
+    for img in doc.xpath("//img"):
+        src = _source_image(img)
+        if not src:
+            continue
+        chemin = urlparse(urljoin(base_url, src)).path.lower()  # sans le domaine (qui contient toujours la marque)
+        ctx = _contexte(img) + " " + chemin
+        parle_logo = "logo" in ctx or "brand" in ctx
+        de_la_marque = marque_compacte in _compact(ctx)
+        if not (parle_logo or (de_la_marque and _dans(img, "header"))) or a_eviter(ctx.replace("logo", "")):
+            continue
+        ext = _extension(unquote(src).split("?")[0])
+        score = 5.0 + 2 * (ext == "svg") + 1 * (ext == "png") + 2 * _dans(img, "header") + 1.5 * de_la_marque \
+            - 2.5 * (not de_la_marque and not _dans(img, "header")) - 4 * _dans(img, "footer") \
+            - 3 * (_dans(img, "nav") and not de_la_marque)  # logo d'une rubrique du menu (revue, programme…)
+        cands.append({"url": urljoin(base_url, src), "score": score, "origine": "image de l'en-tête du site"})
+    # 3. dessins vectoriels écrits dans la page (<svg> du logo)
+    for svg in doc.xpath('//*[local-name()="svg"]'):
+        titre = " ".join(svg.xpath('.//*[local-name()="title"]/text()'))
+        ctx = _contexte(svg) + " " + titre.lower()
+        if not ("logo" in ctx or marque_compacte in _compact(ctx)) or a_eviter(ctx.replace("logo", "")):
+            continue
+        if svg.xpath('.//*[local-name()="use"]') and not svg.xpath('.//*[local-name()="path"]'):
+            continue  # simple renvoi vers un dessin rangé ailleurs dans la page : illisible seul
+        if len(svg.xpath('.//*[local-name()="path" or local-name()="polygon" or local-name()="rect"]')) < 2:
+            continue  # trop simple pour être un logo (icône)
+        try:
+            texte = lxml.html.tostring(svg, encoding="unicode")
+        except Exception:
+            continue
+        if "xmlns=" not in texte[:300]:
+            texte = texte.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1)
+        score = 6.5 + 2 * _dans(svg, "header") - 4 * _dans(svg, "footer")
+        cands.append({"svg": texte.encode("utf-8"), "score": score, "origine": "dessin vectoriel de l'en-tête du site"})
+    cands.sort(key=lambda c: -c["score"])
+    if any(c["score"] >= 6.5 for c in cands):  # des logos sûrs : les candidats douteux (logo d'une revue…) sont écartés
+        cands = [c for c in cands if c["score"] >= 6.5]
+    vus, sortie = set(), []
+    for c in cands:
+        cle = c.get("url") or hashlib.md5(c["svg"]).hexdigest()
+        if cle not in vus:
+            vus.add(cle)
+            sortie.append(c)
+    return sortie[:5]
+
+
+_BALISE_SVG = re.compile(rb"<svg\b[^>]*>", re.I | re.S)
+
+
+def _svg_dimensionne(octets: bytes) -> bytes:
+    """Un dessin vectoriel sans largeur ni hauteur en pixels (seulement une « viewBox », cas fréquent sur les sites)
+    serait dessiné sur une page par défaut, trop grande : on lui donne les dimensions de sa viewBox."""
+    m = _BALISE_SVG.search(octets)
+    if not m:
+        return octets
+    balise = m.group(0)
+    vb = re.search(rb"viewBox\s*=\s*[\"']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)", balise, re.I)
+    if not vb:
+        return octets
+
+    def en_pixels(att):
+        v = re.search(rb"\s" + att + rb"\s*=\s*[\"']\s*([\d.]+)\s*(px)?\s*[\"']", balise)
+        return v is not None
+
+    if en_pixels(b"width") and en_pixels(b"height"):
+        return octets
+    nouvelle = re.sub(rb"\s(width|height)\s*=\s*[\"'][^\"']*[\"']", b"", balise)
+    nouvelle = nouvelle[:4] + b' width="' + vb.group(1) + b'" height="' + vb.group(2) + b'"' + nouvelle[4:]
+    return octets[:m.start()] + nouvelle + octets[m.end():]
+
+
+def svg_en_png(octets: bytes, cote: int = COTE_RENDU_SVG):
+    """Dessin vectoriel (SVG) converti en image PNG à fond transparent (PyMuPDF). Retourne (image PIL, octets PNG)."""
+    import fitz
+    octets = _svg_dimensionne(octets)
+    doc = fitz.open(stream=octets, filetype="svg")
+    page = doc[0]
+    w, h = page.rect.width, page.rect.height
+    if w <= 0 or h <= 0:
+        raise ValueError("dessin vide")
+    zoom = cote / max(w, h)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=True)
+    png = pix.tobytes("png")
+    img = Image.open(io.BytesIO(png))
+    img.load()
+    return img, png
+
+
+def _est_svg(octets: bytes, url: str = "") -> bool:
+    debut = octets[:400].lstrip().lower()
+    return _extension(unquote(url).split("?")[0]) == "svg" or debut.startswith(b"<svg") or (
+        debut.startswith(b"<?xml") and b"<svg" in octets[:1500].lower())
+
+
+def _logo_du_candidat(cand: dict, page: str):
+    """(image PIL, octets prêts à enregistrer) d'un candidat, ou None."""
+    try:
+        if "svg" in cand:
+            return svg_en_png(cand["svg"])
+        octets = ip.telecharger_octets(cand["url"], referer=page, max_octets=MAX_LOGO_OCTETS, delai=(4, 12))
+        if _est_svg(octets, cand["url"]):
+            return svg_en_png(octets)
+        img = Image.open(io.BytesIO(octets))
+        img.load()
+        return img, octets
+    except Exception:
+        return None
+
+
+def _rogner_transparent(img: Image.Image) -> Image.Image:
+    """Retire les marges vides (transparentes) autour d'un logo."""
+    rgba = img.convert("RGBA")
+    boite = rgba.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
+    return rgba.crop(boite) if boite else rgba
+
+
+def propositions_site_officiel(marque: str, nombre: int = 3, budget: float = 25.0):
+    """Logos trouvés sur le site officiel de la marque. Retourne (propositions avec l'image, incidents).
+    Chaque proposition : {nom, url, page, site, largeur, hauteur, licence, source, rang, octets, miniature}."""
+    jetons = jetons_marque(marque)
+    incidents = []
+    if not jetons:
+        return [], incidents
+    debut = time.time()
+    sites = _sites_officiels(marque, jetons, incidents)
+
+    def lire(url):
+        try:
+            html, finale = ip._telecharger_page(url)
+        except Exception:
+            return None
+        if not _domaine_de_marque(finale, jetons):
+            return None  # renvoi vers un autre site (domaine à vendre, revendeur…)
+        titre = re.search(r"<title[^>]*>(.*?)</title>", html[:100_000], re.I | re.S)
+        if titre and DOMAINE_A_VENDRE.search(titre.group(1)):
+            return None
+        if "".join(jetons) not in _compact(html[:200_000]):
+            return None  # la page ne parle pas de la marque (page d'attente…)
+        return html, finale
+
+    pages = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for res in ex.map(lire, sites):
+            if res and _domaine(res[1]) not in {_domaine(p[1]) for p in pages}:
+                pages.append(res)
+    if not pages:
+        incidents.append("Site officiel — introuvable ou inaccessible")
+        return [], incidents
+    sortie = []
+    for html, finale in pages[:MAX_SITES]:
+        if time.time() - debut > budget or len(sortie) >= nombre:
+            break
+        for cand in candidats_logo_page(html, finale, jetons):
+            res = _logo_du_candidat(cand, finale)
+            if not res:
+                continue
+            img, octets = res
+            if img.mode in ("RGBA", "LA", "P"):
+                img = _rogner_transparent(img)
+                if "svg" in cand or _est_svg(octets, cand.get("url", "")):
+                    tampon = io.BytesIO()
+                    img.save(tampon, "PNG")
+                    octets = tampon.getvalue()
+            if max(img.size) < COTE_MIN_LOGO or not _logo_visible(img):
+                continue
+            if img.width < img.height * 0.6 and cand["score"] < 9:
+                continue  # très étroit et haut : plutôt une icône ou un visuel qu'un logo de marque
+            site = _domaine(finale)
+            sortie.append({"nom": f"Logo du site {site}", "url": cand.get("url") or finale, "page": finale,
+                           "site": site, "largeur": img.width, "hauteur": img.height, "licence": "",
+                           "source": f"Site officiel ({site})", "rang": 0, "octets": octets, "miniature": img.copy()})
+            if len(sortie) >= nombre:
+                break
+    return sortie, incidents
+
+
 # --------------------------------------------------------------------------- Ensemble
 def _logo_visible(img: Image.Image) -> bool:
     """Faux pour une image vide ou un logo entièrement blanc (invisible sur une affiche à fond blanc)."""
@@ -284,7 +590,10 @@ def _logo_visible(img: Image.Image) -> bool:
 
 
 def _recuperer(prop: dict):
-    """Télécharge et vérifie l'image d'une proposition. Retourne la proposition complétée, ou None."""
+    """Télécharge et vérifie l'image d'une proposition. Retourne la proposition complétée, ou None.
+    Une proposition du site officiel arrive déjà téléchargée et vérifiée (clés « octets » et « miniature »)."""
+    if prop.get("octets") and prop.get("miniature") is not None:
+        return prop
     try:
         if prop["rang"] <= 1:
             octets = _telecharger_wiki(prop["url"])
@@ -314,14 +623,18 @@ def chercher(marque: str, nombre: int = 8, web=True, budget: float = 40.0):
         return [], "Saisir d'abord la marque.", []
     debut = time.time()
     incidents = []
-    props_wiki, inc = propositions_wikimedia(marque)
-    incidents += inc
+    with ThreadPoolExecutor(max_workers=2) as ex:  # site officiel et Wikimedia en même temps
+        f_site = ex.submit(propositions_site_officiel, marque, 3, budget * 0.7)
+        f_wiki = ex.submit(propositions_wikimedia, marque)
+        props_site, inc_site = f_site.result()
+        props_wiki, inc = f_wiki.result()
+    incidents += inc + inc_site
     props_web = []
-    if web is True or (web == "si_besoin" and len(props_wiki) < 3):
+    if web is True or (web == "si_besoin" and len(props_wiki) + len(props_site) < 3):
         if time.time() - debut < budget:
             props_web, inc = propositions_web(marque)
             incidents += inc
-    candidats = props_wiki + props_web
+    candidats = props_site + props_wiki + props_web
     with ThreadPoolExecutor(max_workers=6) as ex:
         recues = [p for p in ex.map(_recuperer, candidats) if p]
     recues.sort(key=lambda p: p["rang"])  # tri stable : l'ordre de chaque source est conservé

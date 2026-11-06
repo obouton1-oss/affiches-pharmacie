@@ -19,7 +19,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from reportlab.lib.colors import HexColor, white
+from reportlab.lib.colors import Color, HexColor, white
 from reportlab.lib.pagesizes import A4, A5, A6
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -76,6 +76,8 @@ _fichiers_police = {"Open Sans": "OpenSans", "Playfair Display": "PlayfairDispla
 STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix": "#000000",
                 "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
                 "fond_prix": True, "couleur_fond_prix": "#FFD500", "cadre": "aucun", "couleur_cadre": "#175848",
+                # forme du fond de l'offre (prix ou autre offre), quand elle est sur fond coloré : voir FORMES_OFFRE
+                "forme_offre": "bandeau",
                 # couleur du détail du produit : vide = la même que la marque (cas d'origine, et des affiches déjà faites)
                 "couleur_detail": None,
                 # couleur du petit texte au-dessus de l'offre (autres types de promotion) : vide = celle du prix
@@ -154,20 +156,39 @@ CADRES = {"aucun": "Aucun cadre", "fin": "Trait fin", "epais": "Trait épais", "
           "arrondi": "Coins arrondis", "pointille": "Pointillés", "coins": "Coins seulement"}
 # Cadre autour d'un texte (barre au-dessus de l'aperçu) : les mêmes styles, « Sans cadre » par défaut
 CADRES_TEXTE = {"aucun": "Sans cadre", **{k: v for k, v in CADRES.items() if k != "aucun"}}
+# Forme du fond de l'offre (prix ou autre offre) quand elle est sur fond coloré (« fond_prix ») ; sans fond, un simple
+# filet souligne le prix. L'encadré n'a pas de fond : la « couleur du fond du prix » est celle de son contour.
+FORMES_OFFRE = {"bandeau": "Bandeau (rectangle arrondi)", "etiquette": "Étiquette", "macaron": "Macaron (étoile)",
+                "ruban": "Ruban", "encadre": "Encadré (contour, sans fond)"}
 THEMES = {
     "Impact (prix noir sur jaune)": {"couleur_nom": "#175848", "couleur_prix": "#000000",
                                      "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
-                                     "fond_prix": True, "couleur_fond_prix": "#FFD500"},
+                                     "fond_prix": True, "couleur_fond_prix": "#FFD500", "forme_offre": "bandeau"},
     "Charte pharmacie (vert)": {"couleur_nom": "#175848", "couleur_prix": "#175848",
                                 "couleur_accent": "#9ABB1F", "couleur_secondaire": "#6B6B6B",
-                                "fond_prix": False},
+                                "fond_prix": False, "forme_offre": "bandeau"},
     "Promo (prix rouge)": {"couleur_nom": "#222222", "couleur_prix": "#D62828",
                            "couleur_accent": "#D62828", "couleur_secondaire": "#6B6B6B",
-                           "fond_prix": False},
+                           "fond_prix": False, "forme_offre": "bandeau"},
     "Bleu": {"couleur_nom": "#12467A", "couleur_prix": "#12467A",
-             "couleur_accent": "#3C9BD6", "couleur_secondaire": "#6B6B6B", "fond_prix": False},
+             "couleur_accent": "#3C9BD6", "couleur_secondaire": "#6B6B6B", "fond_prix": False,
+             "forme_offre": "bandeau"},
     "Noir et blanc": {"couleur_nom": "#111111", "couleur_prix": "#111111",
-                      "couleur_accent": "#111111", "couleur_secondaire": "#555555", "fond_prix": False},
+                      "couleur_accent": "#111111", "couleur_secondaire": "#555555", "fond_prix": False,
+                      "forme_offre": "bandeau"},
+    # chartes distinctes des affiches de prix promo : opérations, journées conseil, offres sur le panier…
+    "Événement (bleu nuit et or, ruban)": {"couleur_nom": "#1B2A4A", "couleur_prix": "#1B2A4A",
+                                           "couleur_accent": "#C9A227", "couleur_secondaire": "#6B6B6B",
+                                           "fond_prix": True, "couleur_fond_prix": "#E9C46A", "forme_offre": "ruban"},
+    "Douceur (prune, étiquette)": {"couleur_nom": "#5E2750", "couleur_prix": "#FFFFFF",
+                                   "couleur_accent": "#B5838D", "couleur_secondaire": "#7A6A72",
+                                   "fond_prix": True, "couleur_fond_prix": "#8E3B6F", "forme_offre": "etiquette"},
+    "Nature (vert sauge, macaron)": {"couleur_nom": "#2F5D50", "couleur_prix": "#FFFFFF",
+                                     "couleur_accent": "#8DB38B", "couleur_secondaire": "#6B6B6B",
+                                     "fond_prix": True, "couleur_fond_prix": "#4E8B6A", "forme_offre": "macaron"},
+    "Élégant (noir et or, encadré)": {"couleur_nom": "#111111", "couleur_prix": "#111111",
+                                      "couleur_accent": "#B8952F", "couleur_secondaire": "#6B6B6B",
+                                      "fond_prix": True, "couleur_fond_prix": "#B8952F", "forme_offre": "encadre"},
 }
 _polices_enregistrees = {}
 
@@ -463,6 +484,118 @@ def rayon_pastille(texte, largeur_page, gras):
     """Rayon de la pastille : plus grand quand le texte est long (« –12,50 € »)."""
     unite = max(0.1, _largeur_texte(texte, gras, 1.0))
     return largeur_page * 0.10 * min(1.35, max(1.0, unite / 3.2))
+
+
+def forme_offre(st) -> str:
+    """Forme du fond de l'offre choisie dans le style (« bandeau » par défaut, et pour les anciens styles)."""
+    f = (st or {}).get("forme_offre")
+    return f if f in FORMES_OFFRE else "bandeau"
+
+
+def debords_forme(forme, largeur, hauteur):
+    """Place prise par la forme de l'offre au-delà de la boîte du bandeau (largeur × hauteur, marges comprises) :
+    (gauche, droite, bas, haut, décalage du contenu vers la droite). La forme reste centrée sur la page ; seul le
+    contenu d'une étiquette est décalé, pour laisser la pointe à gauche."""
+    if forme == "etiquette":
+        pointe = 0.40 * hauteur
+        return pointe / 2, pointe / 2, 0.0, 0.0, pointe / 2
+    if forme == "macaron":
+        a, b = _axes_macaron(largeur, hauteur)
+        return a - largeur / 2, a - largeur / 2, b - hauteur / 2, b - hauteur / 2, 0.0
+    if forme == "ruban":
+        queue = 0.55 * hauteur
+        return 0.75 * queue, 0.75 * queue, 0.22 * hauteur, 0.0, 0.0
+    return 0.0, 0.0, 0.0, 0.0, 0.0
+
+
+def _axes_macaron(largeur, hauteur):
+    """Demi-axes extérieurs (pointes comprises) du macaron qui contient la boîte largeur × hauteur."""
+    a = largeur / 2 * 1.22 * 1.12
+    b = hauteur / 2 * 1.40 * 1.12
+    if a < b * 1.1:  # contenu étroit : macaron presque rond
+        a = b * 1.1
+    return a, b
+
+
+def _assombrir(couleur, k=0.72):
+    return Color(couleur.red * k, couleur.green * k, couleur.blue * k)
+
+
+def dessiner_fond_offre(c, forme, x0, y0, x1, y1, rayon, couleur):
+    """Fond de l'offre autour de la boîte (x0, y0, x1, y1) : bandeau, étiquette, macaron, ruban ou encadré.
+    Retourne la boîte englobante de la forme dessinée."""
+    w, h = x1 - x0, y1 - y0
+    c.saveState()
+    c.setFillColor(couleur)
+    if forme == "etiquette":
+        pointe = 0.40 * h
+        r = min(rayon, h * 0.22)
+        p = c.beginPath()
+        p.moveTo(x0 - pointe, (y0 + y1) / 2)
+        p.lineTo(x0, y1)
+        p.lineTo(x1 - r, y1)
+        p.curveTo(x1 - r * 0.45, y1, x1, y1 - r * 0.45, x1, y1 - r)
+        p.lineTo(x1, y0 + r)
+        p.curveTo(x1, y0 + r * 0.45, x1 - r * 0.45, y0, x1 - r, y0)
+        p.lineTo(x0, y0)
+        p.close()
+        c.drawPath(p, stroke=0, fill=1)
+        c.setFillColor(white)  # œillet de l'étiquette
+        c.circle(x0 - pointe * 0.30, (y0 + y1) / 2, h * 0.075, stroke=0, fill=1)
+        boite = (x0 - pointe, y0, x1, y1)
+    elif forme == "macaron":
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        a, b = _axes_macaron(w, h)
+        n = 20  # pointes
+        p = c.beginPath()
+        for i in range(2 * n):
+            t = math.pi * i / n
+            k = 1.0 if i % 2 == 0 else 1 / 1.12
+            x, y = cx + a * k * math.cos(t), cy + b * k * math.sin(t)
+            p.moveTo(x, y) if i == 0 else p.lineTo(x, y)
+        p.close()
+        c.drawPath(p, stroke=0, fill=1)
+        boite = (cx - a, cy - b, cx + a, cy + b)
+    elif forme == "ruban":
+        queue, chute = 0.55 * h, 0.22 * h
+        sombre, tres_sombre = _assombrir(couleur), _assombrir(couleur, 0.5)
+        yb, yt = y0 - chute, y0 - chute + 0.78 * h
+        for sens, bord in ((-1, x0), (1, x1)):  # queues du ruban, derrière le bandeau, terminées en « V »
+            ext, int_ = bord + sens * 0.75 * queue, bord - sens * 0.25 * queue
+            p = c.beginPath()
+            p.moveTo(int_, yb)
+            p.lineTo(ext, yb)
+            p.lineTo(ext - sens * 0.30 * queue, (yb + yt) / 2)
+            p.lineTo(ext, yt)
+            p.lineTo(int_, yt)
+            p.close()
+            c.setFillColor(sombre)
+            c.drawPath(p, stroke=0, fill=1)
+            p = c.beginPath()  # pli
+            p.moveTo(bord, y0)
+            p.lineTo(bord - sens * 0.25 * queue, y0)
+            p.lineTo(bord - sens * 0.25 * queue, yb)
+            p.close()
+            c.setFillColor(tres_sombre)
+            c.drawPath(p, stroke=0, fill=1)
+        c.setFillColor(couleur)
+        c.rect(x0, y0, w, h, stroke=0, fill=1)
+        boite = (x0 - 0.75 * queue, yb, x1 + 0.75 * queue, y1)
+    elif forme == "encadre":
+        trait = max(1.2, h * 0.030)
+        c.setStrokeColor(couleur)
+        c.setLineWidth(trait)
+        c.roundRect(x0, y0, w, h, rayon * 0.5, stroke=1, fill=0)
+        retrait = trait * 2.6
+        c.setLineWidth(trait * 0.45)
+        c.roundRect(x0 + retrait, y0 + retrait, w - 2 * retrait, h - 2 * retrait, max(0.0, rayon * 0.5 - retrait),
+                    stroke=1, fill=0)
+        boite = (x0, y0, x1, y1)
+    else:
+        c.roundRect(x0, y0, w, h, rayon, stroke=0, fill=1)
+        boite = (x0, y0, x1, y1)
+    c.restoreState()
+    return boite
 
 
 MAX_VISUELS = 4  # nombre maximal de visuels sur une affiche (par exemple une gamme de produits)
@@ -784,8 +917,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     logo_img = ImageReader(str(chemin_logo)) if (afficher_logo and chemin_logo and Path(chemin_logo).exists()) else None
     nom_seul = bool(afficher_logo and logo_img is None and nom_pharmacie)  # sans logo importé : le nom seul en pied de page
     fond = bool(st.get("fond_prix"))
+    forme = forme_offre(st) if fond else None
     ordre = ordre_valide(st.get("ordre"))
     pad_x, pad_b, pad_h = 0.20, 0.12, 0.16  # marges du bandeau, en fraction du corps du prix
+
+    def debords(w_contenu_, h_kicker_, taille_):
+        """Débords de la forme de l'offre pour un contenu donné (voir debords_forme) ; rien sans fond."""
+        if not fond:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        return debords_forme(forme, w_contenu_ + 2 * pad_x * taille_,
+                             taille_ * (hc + pad_b + pad_h) + h_kicker_)
 
     k = 1.0  # facteur de réduction des textes : en paysage, ils sont réduits jusqu'à tenir dans la hauteur
     while True:
@@ -822,14 +963,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         # texte sous le prix (calcul de la promotion, précision) : juste sous le prix
         bloc_l, l_ligne, t_ligne = 0.0, [], 0.0
         if texte_ligne:
-            l_ligne, t_ligne = _ajuster_titre(texte_ligne, f_ligne, zone_w, g * 0.10, g * 0.028, max_lignes=3,
-                                              equilibre=paysage)
+            forte = bool(promo.get("ligne_forte"))  # détail essentiel de l'offre (paliers) : écrit plus grand
+            l_ligne, t_ligne = _ajuster_titre(texte_ligne, f_ligne, zone_w, g * (0.17 if forte else 0.10),
+                                              g * (0.040 if forte else 0.028), max_lignes=3, equilibre=paysage)
             bloc_l = len(l_ligne) * t_ligne * 1.15
 
         taille_p = g * (0.22 if fond else 0.14) * _facteur_bandeau(grand, kicker)
         while True:
             w_contenu, h_kicker = _contenu_bandeau(prix, grand, kicker, taille_p, f_prix, hc, f_kicker, ks_bandeau)
-            if (w_contenu + (2 * pad_x * taille_p if fond else 0)) <= zone_w or taille_p <= 10:
+            d_g, d_d, d_b, d_h, _ = debords(w_contenu, h_kicker, taille_p)
+            if (w_contenu + (2 * pad_x * taille_p if fond else 0) + d_g + d_d) <= zone_w or taille_p <= 10:
                 break
             taille_p -= 1
         taille_b = taille_p * (0.25 if fond else 0.30) if prix_barre is not None else 0.0
@@ -849,8 +992,8 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
                 y_ligne = y
                 if texte_ligne:
                     y += bloc_l + g * (0.012 if st.get("fond_prix") else 0.024)  # sans bandeau : place pour le filet sous le prix
-                y_prix = y + (taille_p * pad_b if fond else 0)
-                sommet = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0)  # haut du bandeau
+                y_prix = y + (taille_p * pad_b if fond else 0) + d_b
+                sommet = y_prix + taille_p * hc + h_kicker + (taille_p * pad_h if fond else 0) + d_h  # haut du bandeau
                 y = sommet + g * 0.02
             elif nom == "prix_barre":
                 y_barre = y
@@ -962,12 +1105,11 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     cx = cx_t + dx * W
     wp, h_kicker_p = _contenu_bandeau(prix, grand, "" if k_detache else kicker, p, f_prix, hc, f_kicker, ks)
     base = (y_prix + (taille_p * hc + h_kicker) / 2) + dy * H - (p * hc + h_kicker_p) / 2
-    if fond:  # bandeau coloré derrière le prix
+    if fond:  # fond coloré derrière le prix : bandeau, ou autre forme (étiquette, macaron, ruban, encadré)
+        cx += debords(wp, h_kicker_p, p)[4]  # contenu d'une étiquette : un peu à droite, la pointe est à gauche
         bx0, bx1 = cx - wp / 2 - pad_x * p, cx + wp / 2 + pad_x * p
         by0, by1 = base - pad_b * p, base + p * hc + h_kicker_p + pad_h * p
-        c.setFillColor(HexColor(st["couleur_fond_prix"]))
-        c.roundRect(bx0, by0, bx1 - bx0, by1 - by0, 0.14 * p, stroke=0, fill=1)
-        cadres["prix"] = (bx0, by0, bx1, by1)
+        cadres["prix"] = dessiner_fond_offre(c, forme, bx0, by0, bx1, by1, 0.14 * p, HexColor(st["couleur_fond_prix"]))
     else:
         c.setStrokeColor(col_accent)
         c.setLineWidth(max(1.5, g * 0.004 * s))

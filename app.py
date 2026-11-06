@@ -38,7 +38,8 @@ import pharmacie
 import preferences
 import types_affiche
 from chemins import EN_LIGNE
-from affiche import (CADRES, CADRES_TEXTE, DOSSIER_POLICES, ELEMENTS, FORMATS, MAX_VISUELS, POLICES, TEXTES, THEMES, apercu_png,
+from affiche import (CADRES, CADRES_TEXTE, DOSSIER_POLICES, ELEMENTS, FORMATS, FORMES_OFFRE, MAX_VISUELS, POLICES, TEXTES,
+                     THEMES, apercu_png, forme_offre,
                      couleur_detail, couleur_kicker,
                      disposition_a4, libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut,
                      textes_valides)
@@ -205,6 +206,21 @@ retouches.appliquer(ss, ss.get("editeur"))
 
 def maj_style(cle, cle_widget):
     ss.style[cle] = ss[cle_widget]  # vaut pour l'affiche en cours ; « Mettre à jour ce type » le garde pour la suite
+
+
+# Présentation du prix ou de l'offre : simple filet (sans fond), ou fond coloré d'une des formes de affiche.FORMES_OFFRE
+PRESENTATIONS_OFFRE = {**FORMES_OFFRE, "filet": "Sans fond (prix souligné d'un filet)"}
+
+
+def presentation_offre() -> str:
+    return forme_offre(ss.style) if ss.style.get("fond_prix") else "filet"
+
+
+def maj_presentation_offre(cle_widget):
+    choix = ss[cle_widget]
+    ss.style["fond_prix"] = choix != "filet"
+    if choix != "filet":
+        ss.style["forme_offre"] = choix
 
 
 def maj_detail_autre(cle_widget):
@@ -1620,9 +1636,13 @@ with col_form:
                          key="w_police", on_change=maj_style, args=("police", "w_police"))
             st.selectbox("Thème de couleurs", ["— choisir un thème —"] + list(THEMES), key="theme_choisi",
                          on_change=appliquer_theme)
-            cwf = f"cb_fond_{ss.ver}"
-            st.checkbox("Prix sur fond coloré (bandeau)", ss.style["fond_prix"], key=cwf,
-                        on_change=maj_style, args=("fond_prix", cwf))
+            cwf = f"forme_offre_{ss.ver}"
+            st.selectbox("Présentation du prix ou de l'offre", list(PRESENTATIONS_OFFRE),
+                         index=list(PRESENTATIONS_OFFRE).index(presentation_offre()), key=cwf,
+                         format_func=PRESENTATIONS_OFFRE.get, on_change=maj_presentation_offre, args=(cwf,),
+                         help="Bandeau : le rectangle de couleur habituel. Étiquette, macaron, ruban ou encadré : une "
+                              "autre allure, par exemple pour une opération ou une offre sur le panier. Les thèmes "
+                              "« Événement », « Douceur », « Nature » et « Élégant » en proposent des versions prêtes.")
             cdm = f"cb_detail_autre_{ss.ver}"
             detail_autre = st.checkbox("Détail du produit d'une autre couleur que la marque",
                                        bool(ss.style.get("couleur_detail")), key=cdm,
@@ -1635,7 +1655,9 @@ with col_form:
                 champs_couleurs.append(("couleur_detail", "Couleur du détail"))
             if type_promo != promos.STANDARD:
                 champs_couleurs.append(("couleur_kicker", "Petit texte au-dessus de l'offre"))
-            champs_couleurs += [("couleur_prix", "Couleur du prix"), ("couleur_fond_prix", "Couleur du fond du prix"),
+            champs_couleurs += [("couleur_prix", "Couleur du prix"),
+                                ("couleur_fond_prix", "Couleur du contour de l'offre" if presentation_offre() == "encadre"
+                                 else "Couleur du fond du prix"),
                                 ("couleur_accent", "Filet sous le prix (sans fond)"),
                                 ("couleur_secondaire", "Dates et prix barré")]
             for i, (cle, libelle) in enumerate(champs_couleurs):

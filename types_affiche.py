@@ -52,6 +52,7 @@ def style_normalise(style) -> dict:
     res["couleur_kicker"] = kicker.upper() if isinstance(kicker, str) and _HEX.match(kicker) else None
     res["textes"] = af.textes_valides(res.get("textes"))  # police et style propres à chaque texte
     res["fond_prix"] = bool(res["fond_prix"])
+    res["forme_offre"] = af.forme_offre(res)  # forme inconnue (ou ancien style) : bandeau
     if res["cadre"] not in af.CADRES:
         res["cadre"] = af.STYLE_DEFAUT["cadre"]
     if res["police"] not in af.POLICES:

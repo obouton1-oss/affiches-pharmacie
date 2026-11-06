@@ -50,19 +50,27 @@ def _bloc_prix(c, prix, grand, kicker, cx, y_bas, taille, largeur_max, st, bold,
     """Dessine le prix (ou le texte de l'offre, avec son petit texte au-dessus), avec bandeau ou filet, à partir
     de y_bas. Retourne le haut du bloc et le corps utilisé."""
     fond = bool(st.get("fond_prix"))
+    forme = af.forme_offre(st)
     taille *= af._facteur_bandeau(grand, kicker)
+
+    def debords(largeur_, h_kicker_, taille_):
+        if not fond:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        return af.debords_forme(forme, largeur_ + 2 * PAD_X * taille_, taille_ * (hc + PAD_B + PAD_H) + h_kicker_)
+
     while True:
         largeur, h_kicker = af._contenu_bandeau(prix, grand, kicker, taille, bold, hc)
-        if largeur + (2 * PAD_X * taille if fond else 0) <= largeur_max or taille <= 8:
+        d_g, d_d, d_b, d_h, d_x = debords(largeur, h_kicker, taille)
+        if largeur + (2 * PAD_X * taille if fond else 0) + d_g + d_d <= largeur_max or taille <= 8:
             break
         taille -= 1
-    base = y_bas + (taille * PAD_B if fond else taille * 0.09)
-    if fond:
+    base = y_bas + (taille * PAD_B + d_b if fond else taille * 0.09)
+    if fond:  # bandeau, ou autre forme de l'offre (étiquette, macaron, ruban, encadré)
+        cx += d_x
         x0, x1 = cx - largeur / 2 - PAD_X * taille, cx + largeur / 2 + PAD_X * taille
         y0, y1 = base - PAD_B * taille, base + taille * hc + h_kicker + PAD_H * taille
-        c.setFillColor(HexColor(st["couleur_fond_prix"]))
-        c.roundRect(x0, y0, x1 - x0, y1 - y0, 0.14 * taille, stroke=0, fill=1)
-        haut = y1
+        af.dessiner_fond_offre(c, forme, x0, y0, x1, y1, 0.14 * taille, HexColor(st["couleur_fond_prix"]))
+        haut = y1 + d_h
     else:
         c.setStrokeColor(HexColor(st["couleur_accent"]))
         c.setLineWidth(max(1.2, taille * 0.04))
