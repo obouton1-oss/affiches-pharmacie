@@ -10,3 +10,8 @@ borderColor = "#DDE1E8"
 
 [client]
 toolbarMode = "viewer"
+
+[server]
+# Fichiers lourds du nettoyage du fond dans le navigateur (static/detourage : modèle de 43 Mo, moteur de 11 Mo) :
+# servis par morceaux, sans être chargés en entier dans la mémoire du serveur (contrairement aux fichiers d'un composant)
+enableStaticServing = true

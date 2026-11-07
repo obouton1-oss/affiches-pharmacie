@@ -56,7 +56,9 @@ def _agrandir_ia(img: Image.Image, mode: str) -> Image.Image:
     import cv2
     import numpy as np
     nom = MODELES[mode][0]
-    cote = 900 if mode == "qualite" else 1400  # borne la mémoire utilisée par l'agrandissement x4
+    # borne la mémoire de l'agrandissement x4 : le résultat est de toute façon ramené à COTE_MAX (1 800 px), une entrée de
+    # COTE_MAX / 2 suffit (sortie 3 600 px) ; avant : 1 400 px en mode rapide (sortie 5 600 px, environ 450 Mo de pic)
+    cote = COTE_MAX // 2
     if max(img.size) > cote:
         img = img.copy()
         img.thumbnail((cote, cote), Image.LANCZOS)
@@ -64,14 +66,45 @@ def _agrandir_ia(img: Image.Image, mode: str) -> Image.Image:
     sr.readModel(str(_modele(mode)))
     sr.setModel(nom, 4)
     bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-    sortie = sr.upsample(bgr)
-    return Image.fromarray(cv2.cvtColor(sortie, cv2.COLOR_BGR2RGB))
+    return Image.fromarray(cv2.cvtColor(_par_tuiles(sr, bgr, 4, 8 if mode == "rapide" else 16), cv2.COLOR_BGR2RGB))
+
+
+TUILE = 256  # pixels : le réseau calcule des dizaines de couches à la taille de l'image ; par tuiles, la mémoire reste faible
+
+
+def _par_tuiles(sr, bgr, facteur, marge):
+    """Agrandissement par tuiles qui se chevauchent de `marge` pixels (bords recalculés, aucune couture visible) :
+    même résultat qu'en une fois, avec une mémoire de travail bornée (environ 30 Mo au lieu de plusieurs centaines)."""
+    import numpy as np
+    h, w = bgr.shape[:2]
+    sortie = np.zeros((h * facteur, w * facteur, 3), dtype=np.uint8)
+    for y in range(0, h, TUILE):
+        for x in range(0, w, TUILE):
+            y0, x0 = max(0, y - marge), max(0, x - marge)
+            y1, x1 = min(h, y + TUILE + marge), min(w, x + TUILE + marge)
+            grand = sr.upsample(np.ascontiguousarray(bgr[y0:y1, x0:x1]))
+            hy, hx = min(TUILE, h - y), min(TUILE, w - x)
+            dy, dx = (y - y0) * facteur, (x - x0) * facteur
+            sortie[y * facteur:(y + hy) * facteur, x * facteur:(x + hx) * facteur] = \
+                grand[dy:dy + hy * facteur, dx:dx + hx * facteur]
+    return sortie
 
 
 def _agrandir_classique(img: Image.Image) -> Image.Image:
     img = img.convert("RGB")
     grand = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
     return grand.filter(ImageFilter.UnsharpMask(radius=1.6, percent=130, threshold=2))
+
+
+def _rendre_memoire() -> None:
+    """Rend au système la mémoire des grandes images intermédiaires (Linux ; sans effet ailleurs)."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 
 def ameliorer(img: Image.Image, mode: str = "rapide"):
@@ -95,6 +128,7 @@ def ameliorer(img: Image.Image, mode: str = "rapide"):
             methode = "Netteté améliorée (agrandissement classique : modèle IA indisponible)"
     if max(res.size) > COTE_MAX:
         res.thumbnail((COTE_MAX, COTE_MAX), Image.LANCZOS)
+    _rendre_memoire()
     with _verrou_memo:
         _memo[cle] = (res, methode)
         while len(_memo) > MAX_MEMO:

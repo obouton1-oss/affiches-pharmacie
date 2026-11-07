@@ -1,11 +1,16 @@
 """Nettoyage d'un visuel produit : suppression du fond, recadrage serré, fond blanc.
 
-Méthode 1 (si le module « rembg » est installé) : détourage par intelligence artificielle,
-  efficace sur les photos prises « sur le vif ».
+Méthode 1 : détourage par intelligence artificielle (modèle « silueta », version réduite à 43 Mo du modèle U²-Net
+  de la bibliothèque rembg), efficace sur les photos prises « sur le vif ».
+  - De préférence calculé dans le navigateur de l'utilisateur (composant_detourage) : le masque obtenu est transmis à
+    nettoyer(img, masque=...) ; le serveur partagé n'a alors aucun modèle à charger.
+  - À défaut (navigateur ancien, incident), calculé sur le serveur si le module « rembg » est installé, un seul calcul à
+    la fois ; le modèle est libéré aussitôt après, pour ne pas occuper la mémoire en permanence (environ 700 Mo).
 Méthode 2 (toujours disponible) : suppression d'un fond uni ou quasi uni, à partir des bords.
 Les derniers résultats sont gardés en mémoire (nombre limité) pour ne pas être recalculés à chaque
 rafraîchissement de l'écran ; rien n'est écrit sur le disque.
 """
+import gc
 import hashlib
 import shutil
 import threading
@@ -17,6 +22,9 @@ from chemins import DONNEES
 
 ANCIEN_DOSSIER = DONNEES / "images" / "propres"  # ancien cache sur disque, supprimé au démarrage
 COTE_MAX_IA = 1800  # côté maximal (pixels) de l'image soumise au détourage par IA
+MODELE_IA = "silueta"  # même modèle que celui du navigateur (U²-Net réduit à 43 Mo)
+METHODE_IA = "Détourage automatique (IA)"
+METHODE_IA_NAVIGATEUR = "Détourage automatique (IA, sur votre ordinateur)"
 MAX_MEMO = 12       # résultats gardés en mémoire (les plus récents)
 _session = {"obj": None, "essai": 0}
 _memo = OrderedDict()  # résultats déjà calculés dans ce processus (évite de recalculer à chaque rafraîchissement)
@@ -45,7 +53,6 @@ def _rembg_session():
     with _verrou_session:  # une seule session du modèle, même si plusieurs pharmacies la demandent en même temps
         if _session["obj"] is not None or _session["essai"] >= 3:
             return _session["obj"]
-        _session["essai"] += 1  # une panne passagère (téléchargement du modèle…) ne bloque pas définitivement
         try:
             from rembg import new_session
             try:  # options sobres en mémoire (utile sur les hébergements modestes)
@@ -54,16 +61,35 @@ def _rembg_session():
                 options.enable_cpu_mem_arena = False
                 options.enable_mem_pattern = False
                 options.intra_op_num_threads = 2
-                _session["obj"] = new_session("u2net", sess_opts=options)
+                _session["obj"] = new_session(MODELE_IA, sess_opts=options)
             except TypeError:
-                _session["obj"] = new_session("u2net")
+                _session["obj"] = new_session(MODELE_IA)
+            _session["essai"] = 0
         except Exception:
+            _session["essai"] += 1  # une panne passagère (téléchargement du modèle…) ne bloque pas définitivement
             _session["obj"] = None
         return _session["obj"]
 
 
+def _liberer_session() -> None:
+    """Libère le modèle du serveur après usage et rend la mémoire au système (Linux)."""
+    with _verrou_session:
+        _session["obj"] = None
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def rembg_disponible() -> bool:
-    return _rembg_session() is not None
+    """Le détourage par IA est-il possible sur le serveur ? (sans charger le modèle)"""
+    try:
+        import importlib.util
+        return importlib.util.find_spec("rembg") is not None
+    except Exception:
+        return False
 
 
 def _sur_blanc_et_rogner(rgba: Image.Image, marge_rel: float = 0.02) -> Image.Image:
@@ -127,28 +153,77 @@ def _detourage_fond_uni(img: Image.Image, tolerance: int = 28):
     return rgba
 
 
-def nettoyer(img: Image.Image):
-    """Retourne (image propre sur fond blanc, description de la méthode employée)."""
+def cle_image(img: Image.Image) -> str:
+    """Empreinte d'une image (même image = même clé), pour retrouver un nettoyage déjà fait."""
     img = img.convert("RGB")
-    cle = hashlib.sha1(img.resize((128, 128)).tobytes() + str(img.size).encode()).hexdigest()[:16]
+    return hashlib.sha1(img.resize((128, 128)).tobytes() + str(img.size).encode()).hexdigest()[:16]
+
+
+def deja_nettoyee(img: Image.Image):
+    """(image propre, méthode) si cette image a déjà été nettoyée dans ce processus, sinon None."""
+    cle = cle_image(img)
     with _verrou_memo:
         if cle in _memo:
             _memo.move_to_end(cle)
             return _memo[cle]
+    return None
 
-    with VERROU_CALCUL:
-        with _verrou_memo:  # une autre pharmacie vient peut-être de traiter la même image pendant l'attente
-            if cle in _memo:
-                _memo.move_to_end(cle)
-                return _memo[cle]
-        rgba = _detourage_ia(img)
-    methode = "Détourage automatique (IA)"
+
+def rgba_depuis_masque(img: Image.Image, masque: Image.Image):
+    """Image détourée (RGBA) à partir du masque du modèle (320 × 320, niveaux de gris), avec les mêmes étapes que rembg :
+    agrandissement du masque à la taille de l'image, retouche (ouverture, flou léger, seuil), découpe.
+    None si le masque est incohérent (rien ou presque tout détecté)."""
+    import cv2
+    import numpy as np
+    source = img.convert("RGB")
+    if max(source.size) > COTE_MAX_IA:
+        source.thumbnail((COTE_MAX_IA, COTE_MAX_IA), Image.LANCZOS)
+    m = masque.convert("L").resize(source.size, Image.LANCZOS)
+    a = np.array(m)
+    noyau = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    a = cv2.morphologyEx(a, cv2.MORPH_OPEN, noyau)
+    a = cv2.GaussianBlur(a, (5, 5), sigmaX=2, sigmaY=2, borderType=cv2.BORDER_DEFAULT)
+    a = np.where(a < 127, 0, 255).astype(np.uint8)
+    alpha = Image.fromarray(a)
+    if not 0.04 < _couverture(alpha) < 0.97:
+        return None
+    vide = Image.new("RGBA", source.size, 0)
+    return Image.composite(source.convert("RGBA"), vide, alpha)
+
+
+def _finir(img, rgba, methode):
     if rgba is None:
         rgba = _detourage_fond_uni(img)
         methode = "Suppression du fond uni"
     if rgba is None:
-        propre = _sur_blanc_et_rogner(img.convert("RGBA"), 0.0)
-        methode = "Fond non détecté : visuel simplement recadré"
-    else:
-        propre = _sur_blanc_et_rogner(rgba)
-    return _memoriser(cle, (propre, methode))
+        return _sur_blanc_et_rogner(img.convert("RGBA"), 0.0), "Fond non détecté : visuel simplement recadré"
+    return _sur_blanc_et_rogner(rgba), methode
+
+
+def nettoyer(img: Image.Image, masque: Image.Image = None, serveur: bool = True):
+    """Retourne (image propre sur fond blanc, description de la méthode employée).
+    masque : masque calculé par le navigateur (voir composant_detourage) ; sinon, détourage par IA sur le serveur si
+    `serveur` est vrai, ou suppression d'un fond uni."""
+    img = img.convert("RGB")
+    cle = cle_image(img)
+    deja = deja_nettoyee(img)
+    if deja is not None:
+        return deja
+    if masque is not None:
+        try:
+            rgba = rgba_depuis_masque(img, masque)
+        except Exception:
+            rgba = None
+        return _memoriser(cle, _finir(img, rgba, METHODE_IA_NAVIGATEUR))
+    rgba = None
+    if serveur:
+        with VERROU_CALCUL:
+            with _verrou_memo:  # une autre pharmacie vient peut-être de traiter la même image pendant l'attente
+                if cle in _memo:
+                    _memo.move_to_end(cle)
+                    return _memo[cle]
+            try:
+                rgba = _detourage_ia(img)
+            finally:
+                _liberer_session()
+    return _memoriser(cle, _finir(img, rgba, METHODE_IA))

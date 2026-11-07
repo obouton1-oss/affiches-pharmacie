@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<!--
+Nettoyage du fond (détourage par IA) calculé dans le navigateur de l'utilisateur, avec la mémoire de son ordinateur :
+le serveur partagé entre les pharmacies n'a plus à charger le modèle (plusieurs centaines de Mo).
+Modèle « silueta » (version réduite à 43 Mo du modèle U²-Net utilisé par la bibliothèque rembg), exécuté par
+onnxruntime-web 1.20.1 (WebAssembly, licence MIT). Les deux fichiers lourds (modèle, moteur .wasm) sont dans
+static/detourage, servis par Streamlit par morceaux (server.enableStaticServing) : le serveur ne les charge jamais en
+entier en mémoire. Ils sont téléchargés une fois par ordinateur puis gardés dans le cache du navigateur.
+Entrée (arguments) : images = [{cle, data}] (data : image JPEG en data URL, réduite).
+Sortie : {resultats: {cle: masque PNG 320 × 320 en data URL}, erreur: texte ou null, ms: durée}.
+Le masque est agrandi et retouché côté Python exactement comme le fait rembg (voir nettoyage.rgba_depuis_masque).
+-->
+<style>
+html,body{margin:0;padding:0;background:transparent;font-family:"Source Sans Pro",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:13px;color:#6B7280}
+#etat{display:none}
+</style></head>
+<body><div id="etat"></div>
+<script src="./ort.wasm.min.js"></script>
+<script>
+// adresse du composant : …/component/<nom>/index.html ; fichiers statiques de l'application : …/app/static/
+const STATIQUE = new URL("../../app/static/detourage/", location.href).href;
+const MODELE = STATIQUE + "silueta.onnx", MOTEUR = STATIQUE + "ort-wasm-simd-threaded.wasm", TAILLE = 320;
+const MOY = [0.485, 0.456, 0.406], ECART = [0.229, 0.224, 0.225];
+let session = null, chargement = null, enCours = false, attente = null;
+const faits = {};  // cle -> masque déjà calculé dans cette page (renvoyé tel quel)
+
+function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data||{}), "*"); }
+function hauteur(){ post("streamlit:setFrameHeight", {height: 0}); }  // composant invisible : l'état est affiché par l'application
+function etat(texte){
+  const e = document.getElementById("etat");
+  e.textContent = texte || ""; e.classList.toggle("actif", !!texte); hauteur();
+}
+function envoyer(v){ post("streamlit:setComponentValue", {value: Object.assign({ts: Date.now() + Math.random()}, v), dataType: "json"}); }
+
+async function octets(url){
+  // cache du navigateur d'abord (ces fichiers ne se téléchargent qu'une fois par ordinateur)
+  try {
+    if (window.caches) {
+      const c = await caches.open("affiches-detourage-v1");
+      let r = await c.match(url);
+      if (!r) { const f = await fetch(url); if (!f.ok) throw new Error(url.split("/").pop() + " " + f.status); await c.put(url, f.clone()); r = f; }
+      return await r.arrayBuffer();
+    }
+  } catch (e) { /* cache indisponible (navigation privée…) : simple téléchargement */ }
+  const f = await fetch(url); if (!f.ok) throw new Error(url.split("/").pop() + " " + f.status);
+  return await f.arrayBuffer();
+}
+
+function preparerSession(){
+  if (!chargement) chargement = (async () => {
+    ort.env.wasm.numThreads = 1;  // pas de fils multiples : fonctionne sans réglage particulier du site
+    ort.env.wasm.wasmPaths = {mjs: new URL("./ort-wasm-simd-threaded.mjs", location.href).href};
+    ort.env.wasm.wasmBinary = await octets(MOTEUR);  // moteur fourni directement (indépendant du type annoncé par le serveur)
+    session = await ort.InferenceSession.create(new Uint8Array(await octets(MODELE)),
+                                                {executionProviders: ["wasm"], graphOptimizationLevel: "all"});
+    return session;
+  })().catch(e => { chargement = null; throw e; });  // nouvel essai possible au prochain besoin
+  return chargement;
+}
+
+function chargerImage(src){
+  return new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ko(new Error("image illisible")); i.src = src; });
+}
+
+async function masque(src){
+  const img = await chargerImage(src);
+  // réduction en deux temps (lissage de qualité) jusqu'à 320 × 320, comme l'entrée attendue par le modèle
+  let cv = document.createElement("canvas"), w = img.naturalWidth, h = img.naturalHeight;
+  cv.width = w; cv.height = h; let cx = cv.getContext("2d"); cx.drawImage(img, 0, 0);
+  while (w / 2 > TAILLE && h / 2 > TAILLE) {
+    const c2 = document.createElement("canvas"); c2.width = Math.round(w / 2); c2.height = Math.round(h / 2);
+    const x2 = c2.getContext("2d"); x2.imageSmoothingQuality = "high"; x2.drawImage(cv, 0, 0, c2.width, c2.height);
+    cv = c2; w = c2.width; h = c2.height;
+  }
+  const fin = document.createElement("canvas"); fin.width = TAILLE; fin.height = TAILLE;
+  const fx = fin.getContext("2d"); fx.imageSmoothingQuality = "high"; fx.drawImage(cv, 0, 0, TAILLE, TAILLE);
+  const px = fx.getImageData(0, 0, TAILLE, TAILLE).data;
+  let maxi = 1e-6;
+  for (let i = 0; i < px.length; i += 4) { maxi = Math.max(maxi, px[i], px[i + 1], px[i + 2]); }
+  const n = TAILLE * TAILLE, entree = new Float32Array(3 * n);
+  for (let p = 0; p < n; p++) {
+    for (let c = 0; c < 3; c++) entree[c * n + p] = (px[p * 4 + c] / maxi - MOY[c]) / ECART[c];
+  }
+  const s = await preparerSession();
+  const sortie = await s.run({[s.inputNames[0]]: new ort.Tensor("float32", entree, [1, 3, TAILLE, TAILLE])});
+  const pred = sortie[s.outputNames[0]].data;  // [1, 1, 320, 320] : la première carte suffit
+  let mi = Infinity, ma = -Infinity;
+  for (let p = 0; p < n; p++) { const v = pred[p]; if (v < mi) mi = v; if (v > ma) ma = v; }
+  const out = fx.createImageData(TAILLE, TAILLE), d = ma - mi || 1;
+  for (let p = 0; p < n; p++) {
+    const v = Math.max(0, Math.min(255, Math.floor((pred[p] - mi) / d * 255)));
+    out.data[p * 4] = out.data[p * 4 + 1] = out.data[p * 4 + 2] = v; out.data[p * 4 + 3] = 255;
+  }
+  fx.putImageData(out, 0, 0);
+  return fin.toDataURL("image/png");
+}
+
+async function traiter(images){
+  if (enCours) { attente = images; return; }
+  enCours = true;
+  try {
+    const nouvelles = images.filter(im => !(im.cle in faits));
+    if (nouvelles.length) {
+      const t0 = performance.now();
+      const premiere = !session;
+      try {
+        etat(premiere ? "Nettoyage du fond sur votre ordinateur… (première fois : préparation du modèle, quelques secondes)"
+                      : "Nettoyage du fond sur votre ordinateur…");
+        for (const im of nouvelles) faits[im.cle] = await masque(im.data);
+        const resultats = {};
+        for (const im of images) if (im.cle in faits) resultats[im.cle] = faits[im.cle];
+        envoyer({resultats, erreur: null, ms: Math.round(performance.now() - t0)});
+      } catch (e) {
+        envoyer({resultats: {}, erreur: String(e && e.message || e), ms: Math.round(performance.now() - t0)});
+      }
+      etat("");
+    }
+  } finally {
+    enCours = false;
+    if (attente) { const a = attente; attente = null; traiter(a); }
+  }
+}
+
+window.addEventListener("message", e => {
+  const d = e.data || {};
+  if (d.type !== "streamlit:render") return;
+  const args = d.args || {};
+  if (args.prechauffer && !chargement) preparerSession().catch(() => {});  // modèle prêt avant le premier besoin
+  const images = Array.isArray(args.images) ? args.images : [];
+  if (images.length) traiter(images);
+  hauteur();
+});
+post("streamlit:componentReady", {apiVersion: 1});
+hauteur();
+</script>
+</body></html>

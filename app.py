@@ -2,6 +2,7 @@
 Lancement :  streamlit run app.py
 """
 import calendar
+import os
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from urllib.parse import quote
 import base64
 import hashlib
 import html
+import io
 import json
 
 import streamlit as st
@@ -27,6 +29,7 @@ import historique
 import images_produits as ip
 import logos_marques
 import marques
+import memoire
 import mise_en_route
 import planche
 import promos
@@ -98,8 +101,18 @@ if "style" not in st.session_state:
 # Aperçu des polices : composant invisible (affiché à chaque exécution, écrans de mise en route compris) qui écrit chaque
 # nom de police dans sa propre police dans les listes de choix
 apercu_polices = components.declare_component("apercu_polices", path=str(DOSSIER_POLICES))
-with st.container(key="apercu_polices"):
+with st.container(key="apercu_polices"):  # composants invisibles (hors de la mise en page, voir habillage.py)
     apercu_polices(key="apercu_polices_composant", default=None)
+    slot_detourage = st.container()  # nettoyage du fond par le navigateur (rempli à la fin du script)
+# Nettoyage du fond calculé dans le navigateur de l'utilisateur (voir composant_detourage et nettoyage.py) : le serveur
+# partagé n'a plus à charger le modèle d'IA. Composant invisible, toujours affiché au même endroit (le modèle reste
+# chargé dans la page), placé avec l'aperçu des polices ; il est rempli à la fin du script avec les images à nettoyer.
+DETOURAGE_NAVIGATEUR = os.environ.get("AFFICHES_DETOURAGE_SERVEUR", "") != "1"
+detourage_navigateur = components.declare_component(
+    "detourage_navigateur", path=str(Path(__file__).parent / "composant_detourage"))
+st.session_state.a_detourer = {}  # clé de l'image -> image réduite (data URL), à nettoyer par le navigateur
+st.session_state.setdefault("masques_nav", {})  # clé de l'image -> masque PNG renvoyé par le navigateur
+st.session_state.setdefault("nav_ko", False)  # navigateur incapable : nettoyage sur le serveur pour cette session
 if MULTI and not PREFS["faite"] and CTX.prefixe != "":
     mise_en_route.afficher(CTX, premiere_fois=True)  # s'arrête ici (st.stop) tant que la mise en route n'est pas faite
 
@@ -996,6 +1009,42 @@ def miniature_proposition(p, cote=300):
     return m if isinstance(m, str) else _miniature_carree(m, cote)
 
 
+NETTOYAGE_EN_COURS = "Nettoyage du fond en cours sur votre ordinateur…"
+MAX_MASQUES_NAV = 16  # masques renvoyés par le navigateur gardés dans la session (les plus récents)
+
+
+def _image_pour_navigateur(img) -> str:
+    """Image réduite (640 px) en data URL JPEG : le modèle travaille en 320 × 320, inutile d'envoyer plus."""
+    petite = img.convert("RGB").copy()
+    petite.thumbnail((640, 640), Image.LANCZOS)
+    tampon = io.BytesIO()
+    petite.save(tampon, format="JPEG", quality=88)
+    return "data:image/jpeg;base64," + base64.b64encode(tampon.getvalue()).decode("ascii")
+
+
+def nettoyer_visuel(img):
+    """Nettoyage du fond : déjà fait (mémoire du serveur), sinon par le navigateur de l'utilisateur (le masque arrive au
+    passage suivant ; en attendant, l'image d'origine et la mention NETTOYAGE_EN_COURS), sinon sur le serveur."""
+    deja = nettoyage.deja_nettoyee(img)
+    if deja is not None:
+        return deja
+    if not DETOURAGE_NAVIGATEUR or st.session_state.nav_ko:
+        return nettoyage.nettoyer(img)
+    cle = nettoyage.cle_image(img)
+    masque = st.session_state.masques_nav.get(cle)
+    if masque is not None:
+        try:
+            return nettoyage.nettoyer(img, masque=Image.open(io.BytesIO(masque)))
+        except Exception:
+            return nettoyage.nettoyer(img)
+    st.session_state.a_detourer[cle] = _image_pour_navigateur(img)
+    return img, NETTOYAGE_EN_COURS
+
+
+def nettoyer_sur_serveur():
+    st.session_state.nav_ko = True
+
+
 def visuel_final(img, nettoyer_on, rogne, mode_nettete="Désactivée"):
     """Recadrage manuel éventuel, nettoyage (suppression du fond), puis netteté si la résolution est faible."""
     if img is None:
@@ -1006,7 +1055,9 @@ def visuel_final(img, nettoyer_on, rogne, mode_nettete="Désactivée"):
         img = img.crop((int(w * g / 100), int(ht * h / 100), w - int(w * d / 100), ht - int(ht * b / 100)))
     methode = "Visuel d'origine"
     if nettoyer_on:
-        img, methode = nettoyage.nettoyer(img)
+        img, methode = nettoyer_visuel(img)
+        if methode == NETTOYAGE_EN_COURS:
+            return img, methode  # netteté appliquée une fois le fond nettoyé (pas de calcul inutile entre-temps)
     if mode_nettete != "Désactivée" and min(img.size) < SEUIL_NETTETE:
         img, m2 = nettete.ameliorer(img, "qualite" if mode_nettete.startswith("Haute") else "rapide")
         methode = f"{methode} · {m2}"
@@ -1468,6 +1519,10 @@ with col_form:
                     v1.image(_miniature_carree(ss.image, 260), caption=f"Original ({min(ss.image.size)} px)", width=130)
                     v2.image(_miniature_carree(visuel, 260), caption=f"Visuel retenu ({min(visuel.size)} px)", width=130)
                     st.caption(f"Traitement appliqué : {methode}.")
+                    if methode == NETTOYAGE_EN_COURS:
+                        st.button("Le nettoyage ne se fait pas ? Nettoyer sur le serveur", key="nettoyer_serveur",
+                                  type="tertiary", on_click=nettoyer_sur_serveur,
+                                  help="Si votre navigateur ne parvient pas à nettoyer le fond (navigateur ancien…)")
                     retenue_auto = next((p for p in ss.props if p.get("image") == ss.get("choix_auto")), None)
                     if retenue_auto and ss.props_choisie == ss.get("choix_auto"):
                         st.caption(f"Photo retenue automatiquement parmi les {len(ss.props)} trouvées : "
@@ -2556,3 +2611,35 @@ if MULTI:
                 st.code(fiche["bloc"], language="toml")
                 st.button("Effacer ce mot de passe de l'écran", on_click=lambda: ss.pop("adm_fiche", None))
 
+
+# ----------------------------------------------------------------------------
+# Nettoyage du fond par le navigateur : images de ce passage envoyées au composant, masques reçus gardés dans la session
+# ----------------------------------------------------------------------------
+if DETOURAGE_NAVIGATEUR and not st.session_state.nav_ko:
+    with slot_detourage:
+        _a_faire = [{"cle": k, "data": v} for k, v in st.session_state.a_detourer.items()]
+        _retour = detourage_navigateur(images=_a_faire, prechauffer=bool(st.session_state.get("w_nettoyer")),
+                                       key="detourage_nav_composant", default=None)
+    if isinstance(_retour, dict):
+        _nouveaux = False
+        for _cle, _url in (_retour.get("resultats") or {}).items():
+            if _cle not in st.session_state.masques_nav and isinstance(_url, str) and "," in _url:
+                try:
+                    st.session_state.masques_nav[_cle] = base64.b64decode(_url.split(",", 1)[1])
+                    _nouveaux = True
+                except Exception:
+                    pass
+        while len(st.session_state.masques_nav) > MAX_MASQUES_NAV:
+            st.session_state.masques_nav.pop(next(iter(st.session_state.masques_nav)))
+        if _retour.get("erreur") and _a_faire and not _nouveaux:
+            st.session_state.nav_ko = True  # navigateur incapable (ancien, bloqué…) : le serveur prend le relais
+            st.toast("Le nettoyage du fond n'a pas pu se faire dans votre navigateur : il est fait par le serveur.")
+            _nouveaux = True
+        if _nouveaux and _a_faire:
+            st.rerun()
+
+
+
+# Mémoire : à la fin de chaque affichage, la mémoire libérée (images, PDF de l'aperçu…) est rendue au système. Sans cela,
+# chaque session ouverte gardait environ 55 Mo réservés (mesuré : 487 Mo pour 8 sessions, contre 305 Mo avec).
+memoire.rendre()
