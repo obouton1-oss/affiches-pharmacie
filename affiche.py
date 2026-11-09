@@ -24,6 +24,7 @@ from reportlab.lib.pagesizes import A4, A5, A6
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
+from reportlab.pdfgen.canvas import FILL_EVEN_ODD
 
 VERT = HexColor("#175848")
 VERT_CLAIR = HexColor("#9ABB1F")
@@ -759,6 +760,7 @@ def _largeur_espacee(texte, police, taille, espacement):
 
 
 ESPACEMENT_ACCROCHE = 0.08
+EPAISSEUR_PACK = 0.022  # largeur du contour du pack (côtés et bas), en fraction du petit côté de la page
 
 
 def _dessiner_bande_accroche(c, acc, W, H, retrait, h, police):
@@ -982,7 +984,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         if not st.get("couleur_kicker") and k_detache:  # petit texte sorti du fond : lisible sur le blanc
             st["couleur_kicker"] = acc["couleur"]
         st.update({"fond_prix": True, "couleur_fond_prix": acc["couleur"], "couleur_prix": acc["couleur_texte"],
-                   "cadre": "epais", "couleur_cadre": acc["couleur"]})
+                   "cadre": "aucun"})  # le pack a son propre contour, plus large (voir plus bas)
         if forme_offre(st) == "encadre":  # l'encadré n'a pas de fond : bandeau à la place
             st["forme_offre"] = "bandeau"
     hc = _hauteur_chiffre(f_prix)
@@ -1024,7 +1026,10 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
 
     # ---- Paysage : colonne de gauche = visuel(s), colonne de droite = textes, prix et logo
     disposition = None  # plusieurs visuels : (positions, largeur, hauteur) du groupe
-    y_bas_img, y_haut_img = S * 0.05, y_haut
+    # pack : contour plein (côtés et bas) ; le logo et le bas du visuel restent au-dessus de lui
+    ep_pack = S * EPAISSEUR_PACK if (acc and acc["forme"] == "pack") else 0.0
+    bas_libre = (retrait_acc + ep_pack + S * 0.015) if ep_pack else 0.0
+    y_bas_img, y_haut_img = max(S * 0.05, bas_libre), y_haut
     y_haut_txt = y_haut  # en paysage : haut du bloc de textes (colonne de droite)
     if paysage and acc and acc["forme"] == "echarpe":  # l'écharpe est en haut à droite : les textes passent dessous
         b_ech = _geometrie_echarpe(acc, S, polices_famille(st["police"])[1],
@@ -1090,7 +1095,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
 
         # ---- Tailles des éléments (indépendantes de leur position)
         pied_h = g * 0.05
-        y_pied = y_bas_img if paysage else g * 0.03  # en portrait, le logo est collé plus bas que les marges
+        y_pied = y_bas_img if paysage else max(g * 0.03, bas_libre)  # en portrait, le logo est collé plus bas que les marges
         cy_logo = y_pied + pied_h / 2
 
         taille_d = 0.0
@@ -1356,6 +1361,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     except Exception:
         couleur_cadre = HexColor(STYLE_DEFAUT["couleur_cadre"])
     _dessiner_cadre(c, W, H, S, st.get("cadre"), couleur_cadre)
+    if ep_pack:  # contour du pack : bande pleine, alignée sur les bords du bandeau
+        c.saveState()
+        c.setFillColor(HexColor(acc["couleur"]))
+        chemin = c.beginPath()
+        chemin.rect(retrait_acc, retrait_acc, W - 2 * retrait_acc, H - 2 * retrait_acc)
+        chemin.rect(retrait_acc + ep_pack, retrait_acc + ep_pack, W - 2 * (retrait_acc + ep_pack),
+                    H - 2 * (retrait_acc + ep_pack))
+        c.drawPath(chemin, stroke=0, fill=1, fillMode=FILL_EVEN_ODD)
+        c.restoreState()
     c.showPage()
     c.save()
     # Ordre des cadres = ordre des couches dans l'éditeur (le dernier est au-dessus) : éléments de derrière, éléments
