@@ -131,6 +131,7 @@ const P = {
   curseur:'<path d="M5 3l6 16 2.4-6.6L20 10z"/>', aa:'<path d="M3 19 8 6l5 13M4.8 14.5h6.4"/><path d="M15 12.5a2.8 2.8 0 1 1 0 5.6 2.8 2.8 0 0 1 0-5.6zM17.8 11.5V19"/>',
   maj:'<path d="M3 19 7.5 6 12 19M4.6 14.5h5.8M13 19l4.5-13L22 19M14.6 14.5h5.8"/>', fleche:'<path d="m6 9 6 6 6-6"/>',
   coche:'<path d="m5 12 5 5L20 7"/>',
+  accroche:'<path d="M3 10v4a1 1 0 0 0 1 1h3l6 4V5L7 9H4a1 1 0 0 0-1 1z"/><path d="M17 8.5a5 5 0 0 1 0 7M19.5 6a8.5 8.5 0 0 1 0 12"/>',
   cadre:'<rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/><path d="M8 12h8" stroke-opacity=".55"/>',
   seau:'<path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2a2 2 0 0 0 2.8 0L19 11z"/><path d="M5 2l5 5M2 13h15"/><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4z"/>'
 };
@@ -196,6 +197,7 @@ function construire(){
   }
   hauteur();
 }
+function fixe(el){ return !!(((args && args.outils) || {})[el] || {}).fixe; }
 function cadreActif(){ return args && args.actif ? zone.querySelector('.cadre[data-el="' + CSS.escape(args.actif) + '"]') : null; }
 function guides(v, h){ $("guideV").style.display = v ? "block" : "none"; $("guideH").style.display = h ? "block" : "none"; }
 
@@ -219,6 +221,8 @@ zone.addEventListener("pointermove", e => {
   if(action.taille){
     action.k = Math.max(0.2, Math.min(5, Math.hypot(e.clientX - action.cx, e.clientY - action.cy) / Math.max(8, action.d0)));
     action.cadre.style.transform = "scale(" + action.k + ")";
+  }else if(fixe(action.el)){
+    return;                                          // élément à place fixe (accroche) : seule sa taille se règle
   }else{
     let dx = e.clientX - action.x0, dy = e.clientY - action.y0, v = false, h = false;
     if(!e.altKey){   // aimantation au centre de l'affiche (touche Alt : sans aimant)
@@ -255,7 +259,7 @@ zone.addEventListener("dblclick", e => {           // double-clic sur un texte :
 function enSaisie(t){ return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT"); }
 function pousser(dx, dy){
   const c = cadreActif();
-  if(!c) return;
+  if(!c || fixe(args.actif)) return;
   if(!pousse || pousse.el !== args.actif) pousse = {el: args.actif, dx: 0, dy: 0, t: null};
   pousse.dx += dx; pousse.dy += dy;
   c.style.transform = "translate(" + pousse.dx + "px," + pousse.dy + "px)";
@@ -379,7 +383,7 @@ function construireBarre(){
   const actif = args.actif, o = actif ? (args.outils || {})[actif] : null;
   $("bAnnuler").disabled = !args.annuler; $("bRetablir").disabled = !args.retablir;
   $("bAnnuler").onclick = () => envoyer({action:"annuler"}); $("bRetablir").onclick = () => envoyer({action:"retablir"});
-  const sig = JSON.stringify([actif, o, args.couleurs, args.police_affiche, args.plein]);
+  const sig = JSON.stringify([actif, o, args.couleurs, args.police_affiche, args.plein, args.accroche_forme]);
   const champ = $("zoneTexte").querySelector(".champ");
   const enCours = champ && document.activeElement === champ && signature && JSON.parse(signature)[0] === actif;
   if(sig === signature){ if(focusApres && focusApres === actif) focaliserTexte(); return; }
@@ -401,6 +405,14 @@ function construireBarre(){
     for(const [t, i, l] of [["texte","texte","Texte"],["prix","euro","Prix"],["forme","forme","Forme"]]){
       const b = ajout(t, i, l); b.disabled = !!args.plein; if(args.plein) b.title = "12 éléments ajoutés au plus"; outilsEl.appendChild(b);
     }
+    const accActuelle = args.accroche_forme || "aucune";
+    outilsEl.appendChild(bouton(ico("accroche", 16) + "Accroche" + ico("fleche", 14),
+      "Accroche : bandeau « PROMO » en haut, écharpe dans le coin, ou pack complet", b => {
+        const box = el("div"); box.appendChild(el("div", "pop-titre", "Accroche"));
+        for(const [k, v] of Object.entries(args.accroches || {})) box.appendChild(item(null, v, () => envoyer({action:"accroche", valeur: k}), k === accActuelle ? "on" : ""));
+        box.appendChild(el("div", "pop-aide", "Texte « PROMO » par défaut : cliquer ensuite sur l'accroche pour le changer."));
+        ouvrirPop(b, box);
+      }, "ajout" + (accActuelle !== "aucune" ? " on" : "")));
     outilsEl.appendChild(el("span", "pousse"));
     const bp = bouton('<span class="nomp" style="font-family:' + esc(famille(args.police_affiche)) + '">' + esc(args.police_affiche) + '</span>' + ico("fleche", 14),
                       "Police de toute l'affiche", b => ouvrirPop(b, menuPolices(args.police_affiche, false, v => envoyer({action:"police_affiche", valeur: v}))), "bord police");
@@ -432,13 +444,25 @@ function construireBarre(){
         ouvrirPop(b, box);
       }, "bord"));
   }
+  if(o.accroche){
+    const ac = o.accroche;
+    outilsEl.appendChild(bouton('<span class="aa-txt" style="font-weight:700">A</span><span class="pastille" style="background:' + esc(ac.couleur_texte) + '"></span>' + ico("fleche", 14),
+      "Couleur du texte de l'accroche", b => ouvrirPop(b, palette("Couleur du texte", ac.couleur_texte, c => maj("couleur_texte", c))), "bord"));
+    outilsEl.appendChild(bouton(ico("accroche", 15) + ico("fleche", 14), "Forme de l'accroche", b => {
+      const box = el("div"); box.appendChild(el("div", "pop-titre", "Forme de l'accroche"));
+      for(const [k, v] of Object.entries(args.accroches || {})) box.appendChild(item(null, v, () => maj("forme_accroche", k), k === ac.forme ? "on" : ""));
+      ouvrirPop(b, box);
+    }, "bord"));
+  }
   if(o.fond){
     const f = o.fond;
     outilsEl.appendChild(bouton(ico("seau", 15) + '<span class="pastille' + (f.actif ? "" : " vide") + '" style="' + (f.actif ? "background:" + esc(f.couleur) : "") + '"></span>' + ico("fleche", 14),
       "Fond du prix", b => {
         const sans = el("div");
-        sans.appendChild(item(null, f.actif ? "Sans fond" : "Sans fond (actuel)", () => maj("fond", false), f.actif ? "" : "on"));
-        sans.appendChild(el("div", "pop-sep"));
+        if(!f.impose){
+          sans.appendChild(item(null, f.actif ? "Sans fond" : "Sans fond (actuel)", () => maj("fond", false), f.actif ? "" : "on"));
+          sans.appendChild(el("div", "pop-sep"));
+        }else sans.appendChild(el("div", "pop-aide", "Pack complet : le fond du prix prend la couleur de l'accroche."));
         ouvrirPop(b, palette("Couleurs du fond", f.actif ? f.couleur : null, c => maj("couleur_fond", c), sans));
       }, "bord"));
   }

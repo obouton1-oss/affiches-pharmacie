@@ -48,7 +48,7 @@ def orienter(taille_page, paysage: bool):
 ELEMENTS = {"image": "Visuel", "image_1": "Visuel 1", "image_2": "Visuel 2", "image_3": "Visuel 3",
             "image_4": "Visuel 4", "marque": "Marque", "detail": "Détail", "prix_barre": "Prix barré",
             "prix": "Prix", "kicker": "Petit texte de l'offre", "ligne": "Texte sous le prix", "pastille": "Pastille",
-            "dates": "Dates", "logo": "Logo"}
+            "dates": "Dates", "logo": "Logo", "accroche": "Accroche"}
 # Visuel seul (« image ») ou visuels d'une gamme (« image_1 » à « image_4 », réglés chacun à part)
 VISUELS = ("image", "image_1", "image_2", "image_3", "image_4")
 # Ordre des textes sous le visuel, de haut en bas (réglage « ordre » du style ; le texte sous le prix suit toujours le prix)
@@ -83,7 +83,42 @@ STYLE_DEFAUT = {"police": "Helvetica", "couleur_nom": "#175848", "couleur_prix":
                 # couleur du petit texte au-dessus de l'offre (autres types de promotion) : vide = celle du prix
                 "couleur_kicker": None,
                 # police, gras, italique et souligné propres à chaque texte (voir TEXTES) ; vide = tout comme avant
-                "textes": {}}
+                "textes": {},
+                # accroche en option (bandeau « PROMO » en haut, écharpe dans un coin, ou pack complet) : voir ACCROCHES ;
+                # vide = pas d'accroche (cas d'origine)
+                "accroche": None}
+
+# Accroche : un mot fort, blanc sur rouge par défaut, pour que l'affiche attire l'œil.
+#  - bandeau : sur toute la largeur, en haut de l'affiche ; le reste de l'affiche descend d'autant ;
+#  - echarpe : en biais dans un coin du haut (à l'opposé de la pastille « –25 % » s'il y en a une) ;
+#  - pack : le bandeau, plus un cadre épais et l'offre (prix) aux couleurs de l'accroche.
+ACCROCHES = {"aucune": "Sans accroche", "bandeau": "Bandeau en haut", "echarpe": "Écharpe dans le coin",
+             "pack": "Pack complet (bandeau, cadre et prix)"}
+ACCROCHE_TEXTE = "PROMO"
+ACCROCHE_COULEUR, ACCROCHE_COULEUR_TEXTE = "#D7141A", "#FFFFFF"
+IDEES_ACCROCHE = ("PROMO", "PRIX CHOC", "BON PLAN", "OFFRE DU MOIS", "NOUVEAU", "DERNIERS JOURS", "EXCLU PHARMACIE",
+                  "SPÉCIAL HIVER", "SPÉCIAL ÉTÉ")
+MAX_TEXTE_ACCROCHE = 40
+
+
+def accroche_valide(brut):
+    """Accroche du style ramenée à sa forme complète {forme, texte, couleur, couleur_texte}, ou None (pas d'accroche).
+    Texte vide : « PROMO »."""
+    if not isinstance(brut, dict) or brut.get("forme") not in ACCROCHES or brut.get("forme") == "aucune":
+        return None
+    texte = " ".join(str(brut.get("texte") or "").split())[:MAX_TEXTE_ACCROCHE] or ACCROCHE_TEXTE
+    res = {"forme": brut["forme"], "texte": texte}
+    for cle, defaut in (("couleur", ACCROCHE_COULEUR), ("couleur_texte", ACCROCHE_COULEUR_TEXTE)):
+        v = brut.get(cle)
+        res[cle] = v.upper() if isinstance(v, str) and re.match(r"^#[0-9A-Fa-f]{6}$", v) else defaut
+    return res
+
+
+def nouvelle_accroche(ancienne, forme):
+    """Accroche du style après le choix d'une forme (texte et couleurs déjà choisis gardés) ; None pour « aucune »."""
+    if forme not in ACCROCHES or forme == "aucune":
+        return None
+    return accroche_valide({**(ancienne if isinstance(ancienne, dict) else {}), "forme": forme})
 
 
 def couleur_kicker(st) -> str:
@@ -707,6 +742,91 @@ def _dessiner_cadre(c, W, H, S, cadre, couleur):
     c.restoreState()
 
 
+def _texte_espace(c, texte, cx, base, police, taille, couleur, espacement):
+    """Texte centré sur cx, lettres légèrement espacées (espacement : en fraction du corps)."""
+    esp = taille * espacement
+    largeur = stringWidth(texte, police, taille) + esp * max(0, len(texte) - 1)
+    t = c.beginText(cx - largeur / 2, base)
+    t.setFont(police, taille)
+    t.setCharSpace(esp)
+    t.setFillColor(couleur)
+    t.textOut(texte)
+    c.drawText(t)
+
+
+def _largeur_espacee(texte, police, taille, espacement):
+    return stringWidth(texte, police, taille) + taille * espacement * max(0, len(texte) - 1)
+
+
+ESPACEMENT_ACCROCHE = 0.08
+
+
+def _dessiner_bande_accroche(c, acc, W, H, retrait, h, police):
+    """Bandeau d'accroche sur toute la largeur, en haut de l'affiche (dans le retrait du cadre). Retourne son cadre."""
+    x0, x1, y1 = retrait, W - retrait, H - retrait
+    y0 = y1 - h
+    c.saveState()
+    c.setFillColor(HexColor(acc["couleur"]))
+    c.rect(x0, y0, x1 - x0, h, stroke=0, fill=1)
+    hc = _hauteur_chiffre(police)
+    t = h * 0.60
+    while t > 4 and _largeur_espacee(acc["texte"], police, t, ESPACEMENT_ACCROCHE) > (x1 - x0) * 0.92:
+        t *= 0.96
+    _texte_espace(c, acc["texte"], W / 2, y0 + (h - t * hc) / 2, police, t, HexColor(acc["couleur_texte"]),
+                  ESPACEMENT_ACCROCHE)
+    c.restoreState()
+    return x0, y0, x1, y1
+
+
+def _geometrie_echarpe(acc, S, police, echelle=1.0):
+    """(épaisseur, corps du texte, d, a, b) de l'écharpe : d est la distance du milieu de l'écharpe au coin, a et b
+    celles de ses bords intérieur et extérieur, mesurées le long des bords de la page."""
+    e = S * 0.085 * echelle            # épaisseur de l'écharpe (perpendiculairement)
+    t = e * 0.54                        # corps du texte
+    r2 = math.sqrt(2)
+    d_min, d_max = S * 0.22 * echelle, S * 0.46
+    # longueur utile au milieu de l'écharpe : d·√2 (d : distance du milieu de l'écharpe au coin, le long des bords) ;
+    # le texte en occupe au plus 72 %
+    while True:
+        lt = _largeur_espacee(acc["texte"], police, t, ESPACEMENT_ACCROCHE)
+        d = max(d_min, lt / 0.72 / r2 + e * 0.5)
+        if d <= d_max or t <= 4:
+            d = min(d, d_max)
+            break
+        t *= 0.95
+    return e, t, d, d - e * r2 / 2, d + e * r2 / 2
+
+
+def _dessiner_echarpe(c, acc, W, H, S, retrait, police, droite, echelle=1.0):
+    """Écharpe d'accroche en biais (45°) dans un coin du haut de l'affiche : à droite, ou à gauche. Sa longueur
+    s'adapte au texte ; échelle : taille choisie à la main. Retourne son cadre (rectangle qui l'englobe)."""
+    e, t, d, a, b = _geometrie_echarpe(acc, S, police, echelle)
+    hc = _hauteur_chiffre(police)
+    yc = H - retrait
+    if droite:
+        xc = W - retrait
+        points = ((xc - b, yc), (xc - a, yc), (xc, yc - a), (xc, yc - b))
+        centre, angle = (xc - d / 2, yc - d / 2), -45
+    else:
+        xc = retrait
+        points = ((xc + a, yc), (xc + b, yc), (xc, yc - b), (xc, yc - a))
+        centre, angle = (xc + d / 2, yc - d / 2), 45
+    c.saveState()
+    c.setFillColor(HexColor(acc["couleur"]))
+    chemin = c.beginPath()
+    chemin.moveTo(*points[0])
+    for p in points[1:]:
+        chemin.lineTo(*p)
+    chemin.close()
+    c.drawPath(chemin, stroke=0, fill=1)
+    c.translate(*centre)
+    c.rotate(angle)
+    _texte_espace(c, acc["texte"], 0, -t * hc / 2, police, t, HexColor(acc["couleur_texte"]), ESPACEMENT_ACCROCHE)
+    c.restoreState()
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def marge_cadre_texte(S):
     """Écart entre un texte et son cadre (S : petit côté de la page)."""
     return S * 0.014
@@ -856,6 +976,15 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     kdx, kdy, ks = _reg(reglages, "kicker")
     k_detache = bool(kicker) and (abs(kdx) > 1e-9 or abs(kdy) > 1e-9)
     ks_bandeau = 1.0 if k_detache else ks
+    # accroche (en option) ; le pack habille aussi l'offre (fond et texte aux couleurs de l'accroche) et pose un cadre
+    acc = accroche_valide(st.get("accroche"))
+    if acc and acc["forme"] == "pack":
+        if not st.get("couleur_kicker") and k_detache:  # petit texte sorti du fond : lisible sur le blanc
+            st["couleur_kicker"] = acc["couleur"]
+        st.update({"fond_prix": True, "couleur_fond_prix": acc["couleur"], "couleur_prix": acc["couleur_texte"],
+                   "cadre": "epais", "couleur_cadre": acc["couleur"]})
+        if forme_offre(st) == "encadre":  # l'encadré n'a pas de fond : bandeau à la place
+            st["forme_offre"] = "bandeau"
     hc = _hauteur_chiffre(f_prix)
     col_nom, col_prix = HexColor(st["couleur_nom"]), HexColor(st["couleur_prix"])
     col_det = HexColor(couleur_detail(st))
@@ -875,6 +1004,11 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     m = S * 0.07
     zone_w = W - 2 * m
     y_haut = H - S * 0.05
+    retrait_acc = S * 0.024  # comme le cadre de l'affiche : hors de la marge que les imprimantes n'impriment pas
+    h_bande = 0.0
+    if acc and acc["forme"] in ("bandeau", "pack"):  # le bandeau prend le haut de l'affiche : tout le reste descend
+        h_bande = S * 0.10 * min(2.0, max(0.5, _reg(reglages, "accroche")[2]))
+        y_haut = min(y_haut, H - retrait_acc - h_bande - S * 0.025)
     cx_t, cx_img, larg_img = W / 2, W / 2, zone_w  # centre des textes, centre et largeur de la zone du visuel
     cadres = {}  # coordonnées PDF (origine en bas à gauche)
 
@@ -891,6 +1025,11 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     # ---- Paysage : colonne de gauche = visuel(s), colonne de droite = textes, prix et logo
     disposition = None  # plusieurs visuels : (positions, largeur, hauteur) du groupe
     y_bas_img, y_haut_img = S * 0.05, y_haut
+    y_haut_txt = y_haut  # en paysage : haut du bloc de textes (colonne de droite)
+    if paysage and acc and acc["forme"] == "echarpe":  # l'écharpe est en haut à droite : les textes passent dessous
+        b_ech = _geometrie_echarpe(acc, S, polices_famille(st["police"])[1],
+                                   min(2.0, max(0.5, _reg(reglages, "accroche")[2])))[4]
+        y_haut_txt = min(y_haut, H - retrait_acc - b_ech * 0.7)
     if paysage and texte_pastille:  # la pastille occupe le coin haut gauche : le visuel se place en dessous
         y_haut_img = y_haut - 1.95 * rayon_pastille(texte_pastille, S, f_prix) - S * 0.01
     if paysage and images:
@@ -1010,12 +1149,12 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
                 y_marque = y
                 y = y_marque + bloc_m + g * 0.018
                 sommet = y_marque + bloc_m
-        if not paysage or sommet <= y_haut or k <= 0.3:
+        if not paysage or sommet <= y_haut_txt or k <= 0.3:
             break
         k *= 0.96  # en paysage : le bloc de textes dépasse en hauteur, on le réduit un peu et on recommence
 
     if paysage:  # bloc de textes centré en hauteur entre le logo et le haut de la page
-        decalage = max(0.0, y_haut - sommet) / 2
+        decalage = max(0.0, y_haut_txt - sommet) / 2
         y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque = (
             v + decalage for v in (y_dates, y_ligne, y_prix, y_barre, y_detail, y_marque))
         y_image_bas, y_image_haut = y_bas_img, y_haut_img
@@ -1198,6 +1337,16 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
         x0, y0, x1, y1 = x0 - mg, y0 - mg, x1 + mg, y1 + mg
         contour(c, x0, y0, x1 - x0, y1 - y0, forme_c, HexColor(couleur_c) if couleur_c else couleurs_texte[el], S)
         cadres[el] = (x0, y0, x1, y1)
+
+    # ---- Accroche (bandeau ou écharpe), par-dessus le visuel et les textes
+    if acc:
+        police_acc = polices_famille(st["police"])[1]
+        if h_bande:
+            cadres["accroche"] = _dessiner_bande_accroche(c, acc, W, H, retrait_acc, h_bande, police_acc)
+        else:
+            droite = not (texte_pastille and not paysage)  # à l'opposé de la pastille (en haut à droite en portrait)
+            cadres["accroche"] = _dessiner_echarpe(c, acc, W, H, S, retrait_acc, police_acc, droite,
+                                                   min(2.0, max(0.5, _reg(reglages, "accroche")[2])))
 
     for g in libres:  # éléments de devant : au-dessus de tout, le cadre de l'affiche mis à part
         if g["e"]["devant"]:

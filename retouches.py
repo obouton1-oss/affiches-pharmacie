@@ -32,7 +32,7 @@ _CHAMPS_HISTORIQUE = ("style", "reglages", "elements", "extras", "marque", "deta
                       "w_promo_opt_barre", "w_promo_opt_calcul", "w_promo_precision")
 # Éléments de l'affiche qu'on peut retirer depuis la barre de l'aperçu (poubelle) ; le prix et le petit texte de l'offre
 # font partie de l'offre et restent. « Annuler » les remet.
-SUPPRIMABLES = ("image", "marque", "detail", "prix_barre", "ligne", "pastille", "dates", "logo")
+SUPPRIMABLES = ("image", "marque", "detail", "prix_barre", "ligne", "pastille", "dates", "logo", "accroche")
 MESSAGES_SUPPRESSION = {
     "image": "Photo retirée (affiche sans photo). Pour la remettre : Annuler, ou étape 3, « Avec la photo du produit ».",
     "marque": "Marque effacée. Pour la remettre : Annuler, ou la réécrire à l'étape 1.",
@@ -41,7 +41,8 @@ MESSAGES_SUPPRESSION = {
     "ligne": "Texte sous le prix retiré. Pour le remettre : Annuler, ou étape 2.",
     "pastille": "Pastille retirée. Pour la remettre : Annuler, ou étape 2.",
     "dates": "Dates retirées. Pour les remettre : Annuler, ou étape 2, « Afficher une plage de dates ».",
-    "logo": "Logo retiré. Pour le remettre : Annuler, ou étape 3, « Afficher le logo »."}
+    "logo": "Logo retiré. Pour le remettre : Annuler, ou étape 3, « Afficher le logo ».",
+    "accroche": "Accroche retirée. Pour la remettre : Annuler, ou étape 3, « Accroche »."}
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 # Couleur de chaque texte de l'affiche : clé du style (plusieurs textes partagent parfois une couleur)
@@ -52,6 +53,39 @@ PARTAGE = {"marque": "Couleur partagée avec le texte sous le prix (et le détai
            "prix_barre": "Couleur partagée avec les dates.", "dates": "Couleur partagée avec le prix barré.",
            "pastille": "Couleur partagée avec le fond du prix."}
 MAX_TEXTE = {"marque": 80, "detail": 300, "prix": 12, "prix_barre": 12}
+
+
+def pack(style):
+    """Accroche « pack » en place (elle impose les couleurs de l'offre) : l'accroche, sinon None."""
+    acc = af.accroche_valide(style.get("accroche"))
+    return acc if acc and acc["forme"] == "pack" else None
+
+
+def changer_accroche(ss, forme):
+    """Choix de la forme d'accroche (« aucune » la retire) ; le texte et les couleurs déjà choisis sont gardés, même
+    après l'avoir retirée (mémoire « accroche_memo » de la session)."""
+    style = ss["style"]
+    ancienne = af.accroche_valide(style.get("accroche")) or ss.get("accroche_memo")
+    style["accroche"] = af.nouvelle_accroche(ancienne, forme)
+    if style["accroche"]:
+        ss["accroche_memo"] = dict(style["accroche"])
+
+
+def maj_accroche(ss, champ, valeur):
+    """Texte (« texte »), couleur du fond (« couleur ») ou du texte (« couleur_texte ») de l'accroche en place."""
+    acc = af.accroche_valide(ss["style"].get("accroche"))
+    if acc is None:
+        return
+    if champ == "texte":
+        acc["texte"] = str(valeur or "")
+    elif champ in ("couleur", "couleur_texte"):
+        if _hex(valeur) is None:
+            return
+        acc[champ] = _hex(valeur)
+    else:
+        return
+    ss["style"]["accroche"] = af.accroche_valide(acc)
+    ss["accroche_memo"] = dict(ss["style"]["accroche"])
 
 
 # ----------------------------------------------------------------------------
@@ -171,7 +205,18 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
     """Pour chaque élément présent sur l'aperçu, ce que sa barre de réglages propose et les valeurs actuelles."""
     style = ss["style"]
     res = {}
+    acc_pack = pack(style)
     for el in cadres:
+        if el == "accroche":
+            acc = af.accroche_valide(style.get("accroche"))
+            if acc is None:
+                continue
+            res[el] = {"titre": af.ACCROCHES[acc["forme"]], "taille": True, "fixe": True, "supprimable": True,
+                       "actions": ["reinit"], "couleur": acc["couleur"],
+                       "texte": {"valeur": acc["texte"], "multi": False, "max": af.MAX_TEXTE_ACCROCHE,
+                                 "indication": "Texte de l'accroche, ex. PROMO"},
+                       "accroche": {"forme": acc["forme"], "couleur_texte": acc["couleur_texte"]}}
+            continue
         if el in af.ELEMENTS:
             o = {"titre": af.ELEMENTS[el], "taille": True, "actions": ["reinit"]}
             if el == "marque" and logo_marque:
@@ -192,6 +237,11 @@ def outils(ss, cadres, *, standard=True, logo_marque=False):
                 o["aide_couleur"] = PARTAGE["pastille"]
             if el == "prix":
                 o["fond"] = {"actif": bool(style.get("fond_prix")), "couleur": _couleur_style(style, "couleur_fond_prix")}
+            if acc_pack and el in ("prix", "pastille"):  # le pack impose ses couleurs à l'offre : on règle les siennes
+                o["couleur"] = acc_pack["couleur_texte"] if el == "prix" else acc_pack["couleur"]
+                o["aide_couleur"] = "Couleurs de l'accroche (pack complet)."
+                if el == "prix":
+                    o["fond"] = {"actif": True, "couleur": acc_pack["couleur"], "impose": True}
             if el == "marque" and not logo_marque:
                 o["texte"] = {"valeur": ss.get("marque", ""), "multi": False, "max": MAX_TEXTE["marque"],
                               "indication": "Marque"}
@@ -257,6 +307,10 @@ def couleurs_affiche(ss):
     for cle in ("couleur_nom", "couleur_detail", "couleur_prix", "couleur_fond_prix", "couleur_accent",
                 "couleur_secondaire"):
         c = _couleur_style(style, cle).upper()
+        if c not in vues:
+            vues.append(c)
+    acc = af.accroche_valide(style.get("accroche"))
+    for c in ((acc["couleur"], acc["couleur_texte"]) if acc else ()):
         if c not in vues:
             vues.append(c)
     for e in ss.get("elements") or []:
@@ -362,6 +416,19 @@ def _maj_cadre(actuel, champ, valeur):
 
 def _maj_standard(ss, el, champ, valeur):
     style = ss["style"]
+    if el == "accroche":
+        if champ == "forme_accroche":
+            changer_accroche(ss, valeur)
+        else:
+            maj_accroche(ss, champ, valeur)
+        return
+    if pack(style) and el in ("prix", "pastille") and champ in ("couleur", "couleur_fond", "fond"):
+        # pack complet : les couleurs de l'offre sont celles de l'accroche
+        if champ == "couleur_fond" or (champ == "couleur" and el == "pastille"):
+            maj_accroche(ss, "couleur", valeur)
+        elif champ == "couleur":
+            maj_accroche(ss, "couleur_texte", valeur)
+        return
     if champ in ("cadre", "couleur_cadre"):
         if el not in af.TEXTES:
             return
@@ -518,6 +585,13 @@ def _appliquer(ss, ev):
                 ss["ver"] = ss.get("ver", 0) + 1
         noter(ss)
         return
+    if action == "accroche":
+        changer_accroche(ss, ev.get("valeur"))
+        if ss["style"].get("accroche"):
+            _selectionner(ss, "accroche")
+        ss["ver"] = ss.get("ver", 0) + 1
+        noter(ss)
+        return
     if action == "police_affiche":
         if ev.get("valeur") in af.POLICES:
             ss["style"]["police"] = ss["w_police"] = ev["valeur"]
@@ -546,8 +620,9 @@ def _appliquer(ss, ev):
                 ss["elements"] = [libres.deplacer(x, ddx, ddy, ds) if x["id"] == ident else x for x in ss["elements"]]
             else:
                 g = ss["reglages"][el]
-                g["dx"] += ddx
-                g["dy"] -= ddy
+                if el != "accroche":  # l'accroche a sa place (en haut, ou dans le coin) : seule sa taille change
+                    g["dx"] += ddx
+                    g["dy"] -= ddy
                 g["s"] = min(4.0, max(0.2, g["s"] * ds))
             ss["ver"] = ss.get("ver", 0) + 1
     elif action == "maj":
@@ -634,6 +709,8 @@ def _appliquer(ss, ev):
             ss["w_dates_on"] = False
         elif el == "logo":
             ss["w_logo"] = False
+        elif el == "accroche":
+            changer_accroche(ss, "aucune")
         ss["selection_apercu"] = False
         ss["msg_ouvert"] = MESSAGES_SUPPRESSION[el]
         ss["ver"] = ss.get("ver", 0) + 1

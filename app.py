@@ -42,7 +42,8 @@ import pharmacie
 import preferences
 import types_affiche
 from chemins import EN_LIGNE
-from affiche import (CADRES, CADRES_TEXTE, DOSSIER_POLICES, ELEMENTS, FORMATS, FORMES_OFFRE, MAX_VISUELS, POLICES, TEXTES,
+from affiche import (ACCROCHE_TEXTE, ACCROCHES, IDEES_ACCROCHE,
+                     MAX_TEXTE_ACCROCHE, accroche_valide, CADRES, CADRES_TEXTE, DOSSIER_POLICES, ELEMENTS, FORMATS, FORMES_OFFRE, MAX_VISUELS, POLICES, TEXTES,
                      THEMES, apercu_png, forme_offre,
                      couleur_detail, couleur_kicker,
                      disposition_a4, libelle_dates, orienter, parse_prix, pdf_impression, rendu, reglages_defaut,
@@ -235,6 +236,25 @@ def maj_presentation_offre(cle_widget):
     ss.style["fond_prix"] = choix != "filet"
     if choix != "filet":
         ss.style["forme_offre"] = choix
+
+
+def maj_accroche_forme(cle_widget):
+    """Choix de l'accroche (étape 3) : bandeau, écharpe, pack, ou aucune."""
+    retouches.changer_accroche(ss, ss[cle_widget])
+    ss.ver += 1
+
+
+def maj_accroche_champ(champ, cle_widget):
+    """Texte ou couleurs de l'accroche (étape 3)."""
+    retouches.maj_accroche(ss, champ, ss[cle_widget])
+    ss.ver += 1  # la barre de l'aperçu et les autres champs reprennent la valeur
+
+
+def choisir_idee_accroche(cle_widget):
+    """Un texte d'accroche choisi parmi les idées proposées."""
+    if ss[cle_widget]:
+        retouches.maj_accroche(ss, "texte", ss[cle_widget])
+    ss.ver += 1  # la liste d'idées repart sans choix
 
 
 def maj_detail_autre(cle_widget):
@@ -1687,6 +1707,33 @@ with col_form:
                     help="Décocher pour une affiche sans image (par exemple une petite affiche de rayon) : la recherche "
                          "de photo est alors ignorée.")
 
+        # Accroche : un mot fort (« PROMO » par défaut) en bandeau, en écharpe, ou en pack complet
+        acc = accroche_valide(ss.style.get("accroche"))
+        cka = f"accroche_{ss.ver}"
+        st.radio("Accroche, pour attirer l'œil", list(ACCROCHES), format_func=lambda k: {
+                     "aucune": "Aucune", "bandeau": "Bandeau", "echarpe": "Écharpe", "pack": "Pack complet"}[k],
+                 index=list(ACCROCHES).index(acc["forme"] if acc else "aucune"), key=cka, horizontal=True,
+                 on_change=maj_accroche_forme, args=(cka,),
+                 help="Bandeau : bande de couleur en haut de l'affiche. Écharpe : bande en biais dans un coin. "
+                      "Pack complet : le bandeau, plus un cadre épais et le prix aux couleurs de l'accroche. "
+                      "L'accroche reste choisie pour les affiches suivantes ; « Mettre à jour ce type » la garde.")
+        if acc:
+            a1, a2, a3 = st.columns([3, 1, 1], vertical_alignment="bottom")
+            ckt = f"accroche_texte_{ss.ver}"
+            a1.text_input("Texte de l'accroche", acc["texte"], key=ckt, max_chars=MAX_TEXTE_ACCROCHE,
+                          placeholder=ACCROCHE_TEXTE, on_change=maj_accroche_champ, args=("texte", ckt),
+                          help="Vide : « PROMO ». Le texte est aussi modifiable en cliquant sur l'accroche dans l'aperçu.")
+            ckf, ckc_ = f"accroche_couleur_{ss.ver}", f"accroche_couleur_texte_{ss.ver}"
+            a2.color_picker("Fond", acc["couleur"], key=ckf, on_change=maj_accroche_champ, args=("couleur", ckf))
+            a3.color_picker("Texte", acc["couleur_texte"], key=ckc_, on_change=maj_accroche_champ,
+                            args=("couleur_texte", ckc_))
+            cki = f"accroche_idees_{ss.ver}"
+            st.pills("Idées de texte", [i for i in IDEES_ACCROCHE if i != acc["texte"]], key=cki,
+                     on_change=choisir_idee_accroche, args=(cki,), label_visibility="collapsed")
+            if acc["forme"] == "pack":
+                st.caption("Pack complet : le fond du prix, le texte du prix et le cadre prennent les couleurs de "
+                           "l'accroche.")
+
         with st.expander("Police et couleurs", icon=":material/palette:"):
             st.selectbox("Police de l'affiche (celle de tous les textes, sauf choix contraire plus bas)", POLICES,
                          key="w_police", on_change=maj_style, args=("police", "w_police"))
@@ -1850,6 +1897,8 @@ with col_apercu:
                             polices=POLICES, police_affiche=ss.style["police"], themes=list(THEMES),
                             couleurs=retouches.couleurs_affiche(ss),
                             formes={k: v[0] for k, v in libres.FORMES.items()}, cadres_texte=CADRES_TEXTE,
+                            accroches=ACCROCHES,
+                            accroche_forme=(accroche_valide(ss.style.get("accroche")) or {}).get("forme", "aucune"),
                             plein=len(ss.elements) >= libres.MAX_ELEMENTS,
                             annuler=retouches.peut_annuler(ss), retablir=retouches.peut_retablir(ss),
                             traites=retouches.traites(ss),
@@ -1994,10 +2043,13 @@ with slot_reglages:
             ks_, kx_, ky_ = f"sl_s_{el}_{ss.ver}", f"sl_dx_{el}_{ss.ver}", f"sl_dy_{el}_{ss.ver}"
             st.slider("Taille (%)", 20, 400, int(round(g["s"] * 100)), key=ks_,
                       on_change=maj_slider, args=(el, "s", ks_))
-            st.slider("Position horizontale (← →, %)", -50, 50, int(round(g["dx"] * 100)),
-                      key=kx_, on_change=maj_slider, args=(el, "dx", kx_))
-            st.slider("Position verticale (↓ ↑, %)", -50, 50, int(round(g["dy"] * 100)),
-                      key=ky_, on_change=maj_slider, args=(el, "dy", ky_))
+            if el == "accroche":  # place fixe (en haut, ou dans le coin) : seule la taille se règle
+                st.caption("L'accroche garde sa place (en haut, ou dans le coin) ; seule sa taille se règle (50 à 200 %).")
+            else:
+                st.slider("Position horizontale (← →, %)", -50, 50, int(round(g["dx"] * 100)),
+                          key=kx_, on_change=maj_slider, args=(el, "dx", kx_))
+                st.slider("Position verticale (↓ ↑, %)", -50, 50, int(round(g["dy"] * 100)),
+                          key=ky_, on_change=maj_slider, args=(el, "dy", ky_))
             b1, b2 = st.columns(2)
             b1.button("Réinitialiser cet élément", on_click=reinitialiser, args=(el,))
             b2.button("Tout réinitialiser", on_click=reinitialiser)

@@ -53,6 +53,7 @@ def style_normalise(style) -> dict:
     res["textes"] = af.textes_valides(res.get("textes"))  # police et style propres à chaque texte
     res["fond_prix"] = bool(res["fond_prix"])
     res["forme_offre"] = af.forme_offre(res)  # forme inconnue (ou ancien style) : bandeau
+    res["accroche"] = af.accroche_valide(res.get("accroche"))  # en option : None = pas d'accroche
     if res["cadre"] not in af.CADRES:
         res["cadre"] = af.STYLE_DEFAUT["cadre"]
     if res["police"] not in af.POLICES:

@@ -52,6 +52,7 @@ def _initialiser(ctx, reglages: dict, prefs: dict, nom_type: str = "", permet_pe
     ss.mer_c_detail = style.get("couleur_detail") or style["couleur_nom"]
     ss.mer_police = style["police"]
     ss.mer_c_kicker = style.get("couleur_kicker")  # petit texte de l'offre : couleur gardée telle quelle ici
+    ss.mer_accroche = style.get("accroche")  # accroche (bandeau « PROMO »…) : gardée telle quelle ici
     ss.mer_textes = af.textes_valides(style.get("textes"))  # police et style de chaque texte : gardés tels quels ici
     ss.mer_nom = prefs["nom"] or ctx.nom
     perso = reglages["format"] == PERSONNALISE
@@ -74,6 +75,7 @@ def _brouillon_style() -> dict:
         st_[champ] = ss[cle]
     st_["couleur_detail"] = ss.mer_c_detail if ss.get("mer_detail_autre") else None
     st_["couleur_kicker"] = ss.get("mer_c_kicker")
+    st_["accroche"] = af.accroche_valide(ss.get("mer_accroche"))
     st_["police"] = ss.mer_police
     st_["textes"] = af.textes_valides(ss.get("mer_textes"))
     st_["fond_prix"] = ss.mer_fond == "Sur fond coloré"
