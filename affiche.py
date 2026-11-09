@@ -759,7 +759,7 @@ def _largeur_espacee(texte, police, taille, espacement):
     return stringWidth(texte, police, taille) + taille * espacement * max(0, len(texte) - 1)
 
 
-ESPACEMENT_ACCROCHE = 0.08
+ESPACEMENT_ACCROCHE = 0.10
 EPAISSEUR_PACK = 0.022  # largeur du contour du pack (côtés et bas), en fraction du petit côté de la page
 
 
@@ -771,7 +771,7 @@ def _dessiner_bande_accroche(c, acc, W, H, retrait, h, police):
     c.setFillColor(HexColor(acc["couleur"]))
     c.rect(x0, y0, x1 - x0, h, stroke=0, fill=1)
     hc = _hauteur_chiffre(police)
-    t = h * 0.60
+    t = h * 0.70
     while t > 4 and _largeur_espacee(acc["texte"], police, t, ESPACEMENT_ACCROCHE) > (x1 - x0) * 0.92:
         t *= 0.96
     _texte_espace(c, acc["texte"], W / 2, y0 + (h - t * hc) / 2, police, t, HexColor(acc["couleur_texte"]),
@@ -783,8 +783,8 @@ def _dessiner_bande_accroche(c, acc, W, H, retrait, h, police):
 def _geometrie_echarpe(acc, S, police, echelle=1.0):
     """(épaisseur, corps du texte, d, a, b) de l'écharpe : d est la distance du milieu de l'écharpe au coin, a et b
     celles de ses bords intérieur et extérieur, mesurées le long des bords de la page."""
-    e = S * 0.085 * echelle            # épaisseur de l'écharpe (perpendiculairement)
-    t = e * 0.54                        # corps du texte
+    e = S * 0.095 * echelle            # épaisseur de l'écharpe (perpendiculairement)
+    t = e * 0.64                        # corps du texte
     r2 = math.sqrt(2)
     d_min, d_max = S * 0.22 * echelle, S * 0.46
     # longueur utile au milieu de l'écharpe : d·√2 (d : distance du milieu de l'écharpe au coin, le long des bords) ;
@@ -1009,7 +1009,7 @@ def construire_pdf(sortie, taille_page, marque, detail, prix, prix_barre=None, t
     retrait_acc = S * 0.024  # comme le cadre de l'affiche : hors de la marge que les imprimantes n'impriment pas
     h_bande = 0.0
     if acc and acc["forme"] in ("bandeau", "pack"):  # le bandeau prend le haut de l'affiche : tout le reste descend
-        h_bande = S * 0.10 * min(2.0, max(0.5, _reg(reglages, "accroche")[2]))
+        h_bande = S * 0.12 * min(2.0, max(0.5, _reg(reglages, "accroche")[2]))
         y_haut = min(y_haut, H - retrait_acc - h_bande - S * 0.025)
     cx_t, cx_img, larg_img = W / 2, W / 2, zone_w  # centre des textes, centre et largeur de la zone du visuel
     cadres = {}  # coordonnées PDF (origine en bas à gauche)
